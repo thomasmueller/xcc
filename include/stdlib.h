@@ -17,6 +17,7 @@ void *calloc(size_t size, size_t n);
 
 void exit(int code) __attribute__((noreturn));
 int atexit(void (*func)(void));
+void abort(void) __attribute__((noreturn));
 
 long strtol(const char *p, char **pp, int base);
 unsigned long strtoul(const char *p, char **pp, int base);
@@ -47,3 +48,5 @@ int mkstemp(char *tmpl);
 int mkstemps(char *tmpl, int suffixlen);
 
 char *getenv(const char *varname);
+
+int system(const char *command);
