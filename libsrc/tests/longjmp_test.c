@@ -48,7 +48,7 @@ TEST(multiple_times) {
   int result;
   static int i;  // Local variable might be roll back!
   i = 0;
-  if (result = setjmp(env), result == 0) {
+  if ((result = setjmp(env)) == 0) {
     simple(1);
     fail("unreachable");
   } else {
@@ -73,11 +73,25 @@ TEST(nested) {
   }
 } END_TEST()
 
+TEST(sideeffect) {
+  jmp_buf envs[2];
+  memset(&envs[1], -1, sizeof(envs[1]));
+  jmp_buf *p = &envs[0];
+  static int val;
+  val = 2;
+  int result;
+  if ((result = setjmp(envs[0])) == 0) {
+    longjmp(*p++, ++val);
+  }
+  EXPECT_EQ(3, result);
+} END_TEST()
+
 int main(void) {
   return RUN_ALL_TESTS(
     test_simple,
     test_zero,
     test_multiple_times,
     test_nested,
+    test_sideeffect,
   );
 }
