@@ -197,6 +197,10 @@ static void emit_number(void *ud, const Type *type, Expr *var, int64_t offset) {
   case 2: _SHORT(output); break;
   case 4: _LONG(output); break;
   case 8: _QUAD(output); break;
+  case 16:
+    _QUAD(output);
+    _QUAD("0");
+    break;
   default: assert(false); break;
   }
 }
