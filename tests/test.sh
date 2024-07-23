@@ -209,7 +209,7 @@ test_error() {
   compile_error '*num' 'void main(){ *123; }'
   compile_error '&num' 'void main(){ &123; }'
   compile_error '&enum' 'enum Num { Zero }; void main(){ void *p = &Zero; }'
-  compile_error 'scoped enum name' 'int sub(){enum Num{Zero}; return Zero;} int main(){enum Num n = Zero; return n;}'
+  compile_error 'scoped enum name' 'int sub(){enum Num{Zero}; return Zero;} int main(){enum Num n = 0; return n;}'
   compile_error 'scoped enum value' 'int sub(){enum{Zero}; return Zero;} int main(){return Zero;}'
   compile_error 'assign to non-lhs' 'void main(){ int x; x + 1 = 3; }'
   compile_error 'assign to array' 'void main(){ int a[3], b[3]; a = b; }'
