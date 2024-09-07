@@ -660,9 +660,16 @@ static bool output_exe(const char *ofn, uintptr_t entry_address, SectionGroup se
   if (phnum > 1) {
     size_t datamemsz = section_groups[SEC_DATA].ds->len + section_groups[SEC_DATA].bss_size;
     uintptr_t offset = PROG_START + code_rodata_sz;
-    if (section_groups[SEC_DATA].ds->len > 0)
+    size_t size = section_groups[SEC_DATA].ds->len;
+    if (size > 0)
       offset = ALIGN(offset, DATA_ALIGN);
-    out_program_header(fp, 1, offset, section_groups[SEC_DATA].start_address, section_groups[SEC_DATA].ds->len, datamemsz);
+// #if XCC_TARGET_ARCH == XCC_ARCH_RISCV64
+//     if (size <= 0 && section_groups[SEC_DATA].bss_size > 0) {
+//       // To avoid "couldn't open ELF program" error on spike/pk.
+//       size = 1;  // Dummy
+//     }
+// #endif
+    out_program_header(fp, 1, offset, section_groups[SEC_DATA].start_address, size, datamemsz);
   }
 
   uintptr_t addr = PROG_START;
