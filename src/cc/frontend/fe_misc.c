@@ -1784,7 +1784,9 @@ static Expr *duplicate_inline_function_expr(Function *targetfunc, Scope *targets
         Expr *arg = src_args->data[i];
         vec_push(args, duplicate_inline_function_expr(targetfunc, targetscope, arg));
       }
-      return new_expr_funcall(expr->token, func, args);
+      Expr *funcall = new_expr_funcall(expr->token, func, args);
+      vec_push(curfunc->funcalls, funcall);
+      return funcall;
     }
   case EX_INLINED:
     {

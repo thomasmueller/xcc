@@ -462,6 +462,7 @@ typedef struct Function {
 
   Vector *scopes;  // NULL => prototype definition.
   Stmt *body_block;  // NULL => Prototype definition.
+  Vector *funcalls;  // <Expr*>
   Table *label_table;  // <const Name*, Stmt*>
   Vector *gotos;  // <Stmt*>
   void *extra;
@@ -471,7 +472,6 @@ typedef struct Function {
 
 #define FUNCF_NORETURN        (1 << 0)
 #define FUNCF_STACK_MODIFIED  (1 << 1)
-#define FUNCF_HAS_FUNCALL     (1 << 2)
 
 Function *new_func(Type *type, const Name *name, const Vector *params, Table *attributes, int flag);
 

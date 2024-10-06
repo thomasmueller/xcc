@@ -211,7 +211,7 @@ void emit_defun(Function *func) {
   unsigned long used_reg_bits = fnbe->ra->used_reg_bits;
   if (!no_stmt) {
     fp_saved = frame_size > 0 || fnbe->ra->flag & RAF_STACK_FRAME;
-    lr_saved = (func->flag & FUNCF_HAS_FUNCALL) != 0;
+    lr_saved = func->funcalls->len > 0;
 
     // TODO: Handle fp_saved and lr_saved individually.
     if (fp_saved || lr_saved) {

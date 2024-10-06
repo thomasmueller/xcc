@@ -361,6 +361,7 @@ Function *new_func(Type *type, const Name *name, const Vector *params, Table *at
 
   func->scopes = NULL;
   func->body_block = NULL;
+  func->funcalls = new_vector();
   func->label_table = NULL;
   func->gotos = NULL;
   func->extra = NULL;

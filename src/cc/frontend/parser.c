@@ -982,7 +982,6 @@ static Function *generate_dtor_caller_func(Vector *dtors) {
   const Token *functok = alloc_dummy_ident();
   Table *attributes = NULL;
   Function *func = define_func(functype, functok, top_vars, VS_STATIC, attributes);
-  func->flag |= FUNCF_HAS_FUNCALL;
 
   assert(curfunc == NULL);
   assert(is_global_scope(curscope));
@@ -998,9 +997,10 @@ static Function *generate_dtor_caller_func(Vector *dtors) {
     Function *dtor = dtors->data[i];
     const Token *token = NULL;
     Vector *args = new_vector();
-    Expr *func = new_expr_variable(dtor->name, dtor->type, token, global_scope);
-    Expr *call = new_expr_funcall(token, func, args);
-    vec_push(stmts, new_stmt_expr(call));
+    Expr *funcvar = new_expr_variable(dtor->name, dtor->type, token, global_scope);
+    Expr *funcall = new_expr_funcall(token, funcvar, args);
+    vec_push(func->funcalls, funcall);
+    vec_push(stmts, new_stmt_expr(funcall));
   }
 
   func->body_block = new_stmt_block(NULL, stmts, scope, NULL);
@@ -1049,7 +1049,6 @@ static Function *generate_dtor_register_func(Function *dtor_caller_func) {
   assert(attributes != NULL);
   table_put(attributes, alloc_name("constructor", NULL, false), NULL);
   Function *func = define_func(functype, functok, top_vars, VS_STATIC, attributes);
-  func->flag |= FUNCF_HAS_FUNCALL;
 
   assert(curfunc == NULL);
   assert(is_global_scope(curscope));
@@ -1066,8 +1065,9 @@ static Function *generate_dtor_register_func(Function *dtor_caller_func) {
   vec_push(args, new_expr_fixlit(&tyVoidPtr, token, 0));
   vec_push(args, new_expr_unary(EX_REF, &tyVoidPtr, NULL, new_expr_variable(dso_handle_name, &tyVoidPtr, token, global_scope)));
   // __cxa_atexit(dtor_caller, NULL, &__dso_handle);
-  vec_push(stmts, new_stmt_expr(
-      new_expr_funcall(token, new_expr_variable(cxa_atexit_name, cxa_atexit_functype, token, global_scope), args)));
+  Expr *funcall = new_expr_funcall(token, new_expr_variable(cxa_atexit_name, cxa_atexit_functype, token, global_scope), args);
+  vec_push(func->funcalls, funcall);
+  vec_push(stmts, new_stmt_expr(funcall));
 
   func->body_block = new_stmt_block(NULL, stmts, scope, NULL);
 
