@@ -205,11 +205,12 @@ void emit_defun(Function *func) {
   // Prologue
   // Allocate variable bufer.
   FuncBackend *fnbe = func->extra;
-  size_t frame_size = ALIGN(fnbe->frame_size, 16);
+  size_t frame_size = 0;
   bool fp_saved = false;  // Frame pointer saved?
   bool lr_saved = false;  // Link register saved?
   unsigned long used_reg_bits = fnbe->ra->used_reg_bits;
   if (!no_stmt) {
+    frame_size = fnbe->frame_size;
     fp_saved = frame_size > 0 || fnbe->ra->flag & RAF_STACK_FRAME;
     lr_saved = func->funcalls->len > 0;
 
@@ -224,18 +225,21 @@ void emit_defun(Function *func) {
     // Callee save.
     push_callee_save_regs(used_reg_bits, fnbe->ra->used_freg_bits);
 
-    if (fp_saved) {
+    if (func->flag & FUNCF_STACK_MODIFIED)
+      frame_size = ALIGN(frame_size, 16);
+    frame_size = ALIGN(frame_size + fnbe->stack_work_size, 16);
+
+    if (fp_saved)
       MOV(FP, SP);
-      if (frame_size > 0) {
-        const char *value;
-        if (frame_size <= 0x0fff) {
-          value = IM(frame_size);
-        } else {
-          // Break x17
-          mov_immediate(value = X17, frame_size, true, false);
-        }
-        SUB(SP, SP, value);
+    if (frame_size > 0) {
+      const char *value;
+      if (frame_size <= 0x0fff) {
+        value = IM(frame_size);
+      } else {
+        // Break x17
+        mov_immediate(value = X17, frame_size, true, false);
       }
+      SUB(SP, SP, value);
     }
 
     move_params_to_assigned(func);
@@ -246,8 +250,11 @@ void emit_defun(Function *func) {
   if (!function_not_returned(fnbe)) {
     // Epilogue
     if (!no_stmt) {
-      if (fp_saved)
+      if (fp_saved) {
         MOV(SP, FP);
+      } else if (frame_size > 0) {
+        ADD(SP, SP, IM(frame_size));
+      }
 
       pop_callee_save_regs(used_reg_bits, fnbe->ra->used_freg_bits);
 

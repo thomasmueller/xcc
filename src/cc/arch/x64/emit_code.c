@@ -202,21 +202,25 @@ void emit_defun(Function *func) {
 
     // When function is called, return address is pused onto the stack by caller,
     // so default offset is 8.
-    size_t frame_offset = 8;
+    size_t frame_offset = TARGET_POINTER_SIZE + callee_saved_count * TARGET_POINTER_SIZE;
 
     if (fnbe->frame_size > 0 || fnbe->ra->flag & RAF_STACK_FRAME) {
       PUSH(RBP);
       MOV(RSP, RBP);
       rbp_saved = true;
-      // RBP is pushed so the 16-bytes-align offset becomes 0.
-      frame_offset = 0;
+      // RBP is pushed so tweak offset.
+      frame_offset += TARGET_POINTER_SIZE;
     }
 
-    size_t callee_saved_size = callee_saved_count * TARGET_POINTER_SIZE;
-    frame_size = fnbe->frame_size;
     if (func->funcalls->len > 0 || (func->flag & FUNCF_STACK_MODIFIED)) {
       // Align frame size to 16 only it contains funcall.
-      frame_size += -(fnbe->frame_size + callee_saved_size + frame_offset) & 15;
+      size_t stack_work_size = fnbe->stack_work_size;
+      if (func->flag & FUNCF_STACK_MODIFIED)
+        stack_work_size = ALIGN(stack_work_size, 16);
+      frame_size = fnbe->frame_size + stack_work_size;
+      frame_size += -(frame_size + frame_offset) & 15;
+    } else {
+      frame_size = fnbe->frame_size + fnbe->stack_work_size;
     }
     if (frame_size > 0) {
       SUB(IM(frame_size), RSP);

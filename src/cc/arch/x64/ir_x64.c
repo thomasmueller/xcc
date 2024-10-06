@@ -716,10 +716,10 @@ static void ei_precall(IR *ir) {
   int align_stack = (16 - (ir->precall.caller_saves->len * TARGET_POINTER_SIZE + ir->precall.stack_args_size)) & 15;
   ir->precall.stack_aligned = align_stack;
 
-  int total = align_stack + ir->precall.stack_args_size;
-  if (total > 0) {
-    SUB(IM(total), RSP);
-  }
+  // int total = align_stack + ir->precall.stack_args_size;
+  // if (total > 0) {
+  //   SUB(IM(total), RSP);
+  // }
 }
 
 static void ei_pusharg(IR *ir) {
@@ -773,10 +773,10 @@ static void ei_call(IR *ir) {
   }
 
   IR *precall = ir->call.precall;
-  int total = precall->precall.stack_aligned + precall->precall.stack_args_size;
-  if (total != 0) {
-    ADD(IM(total), RSP);
-  }
+  // int total = precall->precall.stack_aligned + precall->precall.stack_args_size;
+  // if (total != 0) {
+  //   ADD(IM(total), RSP);
+  // }
 
   // Resore caller save registers.
   pop_caller_save_regs(precall->precall.caller_saves);

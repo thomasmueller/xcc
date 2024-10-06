@@ -293,6 +293,13 @@ static VReg *gen_alloca(Expr *expr) {
   VReg *addend = gen_expr(aligned_size);
   VReg *result = add_new_vreg(&tyVoidPtr);
   new_ir_subsp(addend, result);
+
+  FuncBackend *fnbe = curfunc->extra;
+  if (fnbe->stack_work_size > 0) {
+    VReg *work_size = new_const_vreg(ALIGN(fnbe->stack_work_size, 16), to_vsize(&tySize));
+    result = new_ir_bop(IR_ADD, result, work_size, result->vsize, 0);
+  }
+
   curfunc->flag |= FUNCF_STACK_MODIFIED;
   return result;
 }

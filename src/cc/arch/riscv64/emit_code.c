@@ -35,7 +35,7 @@ static bool is_asm(Stmt *stmt) {
   return stmt->kind == ST_ASM;
 }
 
-static int put_vaarg_params(Function *func) {
+static size_t put_vaarg_params(Function *func) {
   assert(func->type->func.vaargs);
 #if VAARG_ON_STACK
   return;
@@ -47,12 +47,12 @@ static int put_vaarg_params(Function *func) {
   enumerate_register_params(func, iparams, MAX_REG_ARGS, fparams, MAX_FREG_ARGS,
                             &iparam_count, &fparam_count);
 
-  int size = 0;
+  ssize_t size = 0;
   int n = MAX_REG_ARGS - iparam_count;
   if (n > 0) {
-    int size_org = n * TARGET_POINTER_SIZE;
+    ssize_t size_org = n * TARGET_POINTER_SIZE;
     size = ALIGN(n, 2) * TARGET_POINTER_SIZE;
-    int offset = size - size_org;
+    ssize_t offset = size - size_org;
     ADDI(SP, SP, IM(-size));
     for (int i = iparam_count; i < MAX_REG_ARGS; ++i, offset += TARGET_POINTER_SIZE)
       SD(kRegParam64s[i], IMMEDIATE_OFFSET(offset, SP));
@@ -163,17 +163,19 @@ void emit_defun(Function *func) {
   // Prologue
   // Allocate variable bufer.
   FuncBackend *fnbe = func->extra;
-  size_t frame_size = ALIGN(fnbe->frame_size, 16);
+  size_t frame_size = 0;
   bool fp_saved = false;  // Frame pointer saved?
   bool ra_saved = false;  // Return Address register saved?
   unsigned long used_reg_bits = fnbe->ra->used_reg_bits;
-  int vaarg_params_saved = 0;
+  size_t vaarg_params_saved = 0;
   if (!no_stmt) {
+    frame_size = fnbe->frame_size;
+
     if (func->type->func.vaargs) {
       vaarg_params_saved = put_vaarg_params(func);
 
       // Re-align frame size.
-      frame_size = ALIGN(fnbe->frame_size + vaarg_params_saved, 16) - vaarg_params_saved;
+      // frame_size = ALIGN(frame_size + vaarg_params_saved, 16) - vaarg_params_saved;
     }
 
     fp_saved = frame_size > 0 || fnbe->ra->flag & RAF_STACK_FRAME;
@@ -191,6 +193,10 @@ void emit_defun(Function *func) {
 
     // Callee save.
     push_callee_save_regs(used_reg_bits, fnbe->ra->used_freg_bits);
+
+    if (func->flag & FUNCF_STACK_MODIFIED)
+      frame_size = ALIGN(frame_size, 16);
+    frame_size = ALIGN(frame_size + fnbe->stack_work_size, 16);
 
     if (fp_saved) {
       MV(FP, SP);
