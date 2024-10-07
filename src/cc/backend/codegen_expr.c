@@ -419,6 +419,37 @@ static void collect_funcall_info(const Type *functype, Vector *args, FuncallInfo
   fcinfo->offset = offset;
 }
 
+size_t detect_stack_work_size(Function *func) {
+  // Enumerate function calls and detect maximum stack work size.
+  size_t work_size = 0;
+  Vector *funcalls = func->funcalls;
+  for (int i = 0; i < funcalls->len; ++i) {
+    Expr *funcall = funcalls->data[i];
+    assert(funcall->kind == EX_FUNCALL);
+
+    Expr *callfn = funcall->funcall.func;
+    if (callfn->kind == EX_VAR && is_global_scope(callfn->var.scope)) {
+      void *proc = table_get(&builtin_function_table, callfn->var.name);
+      if (proc != NULL)
+        continue;
+    }
+    const Type *functype = get_callee_type(callfn->type);
+    assert(functype != NULL);
+
+    Vector *args = funcall->funcall.args;
+    int arg_count = args->len;
+    ArgInfo *arg_infos = ALLOCA(sizeof(*arg_infos) * arg_count);
+    FuncallInfo fcinfo;
+    fcinfo.arg_infos = arg_infos;
+    collect_funcall_info(functype, args, &fcinfo);
+
+    size_t offset = fcinfo.offset;
+    if (work_size < offset)
+      work_size = offset;
+  }
+  return work_size;
+}
+
 static VReg *gen_funcall(Expr *expr) {
   Expr *func = expr->funcall.func;
   if (func->kind == EX_VAR && is_global_scope(func->var.scope)) {

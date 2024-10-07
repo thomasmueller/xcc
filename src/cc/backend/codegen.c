@@ -911,6 +911,7 @@ bool gen_defun(Function *func) {
   alloc_variable_registers(func);
 
   fnbe->ret_bb = new_bb();
+  fnbe->stack_work_size = detect_stack_work_size(func);
 
   // Statements
   gen_stmt(func->body_block);

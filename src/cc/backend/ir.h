@@ -247,6 +247,7 @@ typedef struct FuncBackend {
   VReg *result_dst;
   size_t frame_size;
   FrameInfo vaarg_frame_info;  // Used for va_start.
+  size_t stack_work_size;  // Work size for funcall, etc.
 } FuncBackend;
 
 //

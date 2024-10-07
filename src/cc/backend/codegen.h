@@ -63,3 +63,5 @@ void detect_living_registers(RegAlloc *ra, BBContainer *bbcon);
 void alloc_stack_variables_onto_stack_frame(Function *func);
 
 int calculate_func_param_bottom(Function *func);
+
+size_t detect_stack_work_size(Function *func);
