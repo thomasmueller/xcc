@@ -1,4 +1,3 @@
-import {DisWasm} from './diswasm'
 import {Util} from './util'
 import {WccRunner} from './wcc_runner'
 
@@ -6,7 +5,6 @@ import {WccRunner} from './wcc_runner'
 let sourceTextarea: HTMLTextAreaElement
 let outputTextarea: HTMLTextAreaElement
 let runBtn: HTMLButtonElement
-let compileBtn: HTMLButtonElement
 let statusDiv: HTMLDivElement
 
 // WCC Runner instance
@@ -19,18 +17,16 @@ async function init() {
   sourceTextarea = document.getElementById('sourceCode') as HTMLTextAreaElement
   outputTextarea = document.getElementById('output') as HTMLTextAreaElement
   runBtn = document.getElementById('runBtn') as HTMLButtonElement
-  compileBtn = document.getElementById('compileBtn') as HTMLButtonElement
   statusDiv = document.getElementById('status') as HTMLDivElement
 
   // Set up event listeners
-  runBtn.addEventListener('click', () => runCode(false))
-  compileBtn.addEventListener('click', () => runCode(true))
+  runBtn.addEventListener('click', () => runCode())
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault()
-      runCode(false)
+      runCode()
     }
   })
 
@@ -58,7 +54,6 @@ async function init() {
 // Set button enabled state
 function setButtonsEnabled(enabled: boolean) {
   runBtn.disabled = !enabled
-  compileBtn.disabled = !enabled
 }
 
 // Show status message
@@ -85,8 +80,6 @@ function appendOutput(text: string, isError: boolean = false) {
   // Auto-scroll to bottom
   outputTextarea.scrollTop = outputTextarea.scrollHeight
 }
-
-
 
 // Compile source code
 async function compile(sourceCode: string, extraOptions?: string[]): Promise<string | null> {
@@ -116,8 +109,8 @@ function analyzeCompileErrors() {
   // The WCC Runner already outputs them via the console callback
 }
 
-// Main run/compile function
-async function runCode(compileOnly: boolean) {
+// Main run function
+async function runCode() {
   if (!isLoaded) {
     showStatus('Compiler not ready yet', 'error')
     return
@@ -134,46 +127,22 @@ async function runCode(compileOnly: boolean) {
   clearOutput()
 
   try {
-    if (compileOnly) {
-      showStatus('Compiling...', 'loading')
-      
-      // Compile to object file for disassembly
-      const objFn = 'main.o'
-      const compiledPath = await compile(sourceCode, ['-c', '-o', objFn])
-      
-      if (compiledPath == null) {
-        showStatus('Compilation failed', 'error')
-        return
-      }
-
-      // Disassemble the compiled object
-      const compiledCode = await wccRunner.readFile(objFn)
-      if (compiledCode) {
-        appendOutput('=== WebAssembly Disassembly ===\n')
-        const disWasm = new DisWasm(compiledCode.buffer)
-        disWasm.setLogFunc(s => appendOutput(s + '\n'))
-        disWasm.dump()
-      }
-      
-      showStatus('Compilation successful!', 'success')
-    } else {
-      showStatus('Compiling and running...', 'loading')
-      
-      // Compile to executable
-      const compiledPath = await compile(sourceCode)
-      if (compiledPath == null) {
-        showStatus('Compilation failed', 'error')
-        return
-      }
-
-      // Run the compiled WebAssembly
-      const args = ['a.wasm']
-      
-      appendOutput('=== Program Output ===\n')
-      await wccRunner.runWasi(compiledPath, args)
-      
-      showStatus('Execution completed!', 'success')
+    showStatus('Compiling and running...', 'loading')
+    
+    // Compile to executable
+    const compiledPath = await compile(sourceCode)
+    if (compiledPath == null) {
+      showStatus('Compilation failed', 'error')
+      return
     }
+
+    // Run the compiled WebAssembly
+    const args = ['a.wasm']
+    
+    appendOutput('=== Program Output ===\n')
+    await wccRunner.runWasi(compiledPath, args)
+    
+    showStatus('Execution completed!', 'success')
   } catch (error) {
     appendOutput(`\n❌ Error: ${error}\n`, true)
     showStatus('Operation failed', 'error')

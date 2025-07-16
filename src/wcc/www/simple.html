@@ -58,21 +58,14 @@
         }
         
         .btn.compile:hover {
-            background: #1e7e34;
-        }
-        
-        select, input[type="text"] {
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
+            background: #218838;
         }
         
         .editor-container {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 20px;
-            height: 70vh;
+            margin-bottom: 20px;
         }
         
         .panel {
@@ -82,69 +75,74 @@
         
         .panel h3 {
             margin: 0 0 10px 0;
-            color: #555;
-            border-bottom: 2px solid #007bff;
-            padding-bottom: 5px;
+            color: #333;
+            font-size: 16px;
         }
         
         textarea {
             flex: 1;
-            font-family: 'Monaco', 'Consolas', 'Ubuntu Mono', monospace;
-            font-size: 14px;
+            min-height: 400px;
+            padding: 12px;
             border: 1px solid #ddd;
             border-radius: 4px;
-            padding: 10px;
-            resize: none;
-            outline: none;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 14px;
+            line-height: 1.4;
+            resize: vertical;
         }
         
         textarea:focus {
+            outline: none;
             border-color: #007bff;
-            box-shadow: 0 0 0 2px rgba(0,123,255,0.25);
+            box-shadow: 0 0 0 2px rgba(0,123,255,.25);
         }
         
         .output {
-            background-color: #f8f9fa;
+            background: #f8f9fa;
             color: #333;
         }
         
         .status {
-            margin-top: 10px;
-            padding: 10px;
+            padding: 12px;
             border-radius: 4px;
-            font-weight: bold;
+            margin-top: 10px;
+            font-size: 14px;
+            text-align: center;
         }
         
         .status.loading {
-            background: #fff3cd;
-            color: #856404;
-            border: 1px solid #ffeaa7;
+            background: #e3f2fd;
+            color: #1976d2;
+            border: 1px solid #bbdefb;
         }
         
         .status.success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+            background: #e8f5e8;
+            color: #2e7d32;
+            border: 1px solid #a5d6a7;
         }
         
         .status.error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ef9a9a;
         }
         
-        .hidden {
+        .status.hidden {
             display: none;
         }
         
         @media (max-width: 768px) {
             .editor-container {
                 grid-template-columns: 1fr;
-                height: auto;
             }
             
-            .controls {
-                flex-wrap: wrap;
+            .container {
+                padding: 10px;
+            }
+            
+            body {
+                padding: 10px;
             }
         }
     </style>
@@ -155,14 +153,13 @@
         
         <div class="controls">
             <button id="runBtn" class="btn">▶️ Run</button>
-            <button id="compileBtn" class="btn compile">🔧 Compile</button>
         </div>
         
         <div class="editor-container">
             <div class="panel">
                 <h3>📝 C Source Code</h3>
                 <textarea id="sourceCode" placeholder="Enter your C code here...">// Welcome to Simple C Compiler!
-// Write your C code here and click Run or Compile
+// Write your C code here and click Run
 
 #include <stdio.h>
 
