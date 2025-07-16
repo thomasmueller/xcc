@@ -8,6 +8,10 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, 'release'),
     rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'src/wcc/www/index.html'),
+        simple: resolve(__dirname, 'src/wcc/www/simple.html'),
+      },
       output: {
         entryFileNames: '[name].js',
         assetFileNames: '[name].[ext]',

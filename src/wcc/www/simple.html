@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Simple C Compiler on WASM</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            align-items: center;
+        }
+        
+        .btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        .btn:hover {
+            background: #0056b3;
+        }
+        
+        .btn:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        .btn.compile {
+            background: #28a745;
+        }
+        
+        .btn.compile:hover {
+            background: #1e7e34;
+        }
+        
+        select, input[type="text"] {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .editor-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            height: 70vh;
+        }
+        
+        .panel {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .panel h3 {
+            margin: 0 0 10px 0;
+            color: #555;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 5px;
+        }
+        
+        textarea {
+            flex: 1;
+            font-family: 'Monaco', 'Consolas', 'Ubuntu Mono', monospace;
+            font-size: 14px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            resize: none;
+            outline: none;
+        }
+        
+        textarea:focus {
+            border-color: #007bff;
+            box-shadow: 0 0 0 2px rgba(0,123,255,0.25);
+        }
+        
+        .output {
+            background-color: #f8f9fa;
+            color: #333;
+        }
+        
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        
+        .status.loading {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        @media (max-width: 768px) {
+            .editor-container {
+                grid-template-columns: 1fr;
+                height: auto;
+            }
+            
+            .controls {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Simple C Compiler</h1>
+        
+        <div class="controls">
+            <button id="runBtn" class="btn">▶️ Run</button>
+            <button id="compileBtn" class="btn compile">🔧 Compile</button>
+        </div>
+        
+        <div class="editor-container">
+            <div class="panel">
+                <h3>📝 C Source Code</h3>
+                <textarea id="sourceCode" placeholder="Enter your C code here...">// Welcome to Simple C Compiler!
+// Write your C code here and click Run or Compile
+
+#include <stdio.h>
+
+int main() {
+    printf("Hello, WebAssembly World!\n");
+    return 0;
+}</textarea>
+            </div>
+            
+            <div class="panel">
+                <h3>📺 Output</h3>
+                <textarea id="output" class="output" readonly placeholder="Program output will appear here..."></textarea>
+            </div>
+        </div>
+        
+        <div id="status" class="status hidden"></div>
+    </div>
+
+    <script src="simple.ts" type="module"></script>
+</body>
+</html> 
