@@ -61,6 +61,99 @@ make assets
 echo "   Building web app with Vite..."
 npm run release
 
+echo "   Post-processing: Embedding assets as data URLs..."
+cd release
+
+# Convert wasi_worker.js to base64 data URL
+if [ -f "wasi_worker.js" ]; then
+    echo "     Converting wasi_worker.js to data URL..."
+    
+    # Create base64 encoded data URL
+    WORKER_BASE64=$(base64 -i wasi_worker.js)
+    WORKER_DATA_URL="data:application/javascript;base64,$WORKER_BASE64"
+    
+    # Replace the worker import with the data URL in simple.js
+    if [ -f "simple.js" ]; then
+        # Use a more robust replacement that handles the exact Vite pattern
+        sed -i '' "s|new URL(\"wasi_worker.js\", *import.meta.url).href|\"$WORKER_DATA_URL\"|g" simple.js
+        
+        # Remove the separate worker file since it's now embedded
+        rm wasi_worker.js
+        
+        echo "     ✅ Web Worker embedded as data URL"
+        echo "     ✅ Removed separate wasi_worker.js file"
+    else
+        echo "     ⚠️  simple.js not found, skipping worker embedding"
+    fi
+else
+    echo "     ⚠️  wasi_worker.js not found, skipping worker embedding"
+fi
+
+# Convert wccfiles.zip to base64 data URL
+if [ -f "wccfiles.zip" ]; then
+    echo "     Converting wccfiles.zip to data URL..."
+    
+    # Create base64 encoded data URL for zip file
+    ZIP_BASE64=$(base64 -i wccfiles.zip)
+    ZIP_DATA_URL="data:application/zip;base64,$ZIP_BASE64"
+    
+    # Replace the zip file reference with the data URL in simple.js
+    if [ -f "simple.js" ]; then
+        # Replace the zip file path with data URL
+        sed -i '' "s|\"wccfiles.zip\"|\"$ZIP_DATA_URL\"|g" simple.js
+        
+        # Remove the separate zip file since it's now embedded
+        rm wccfiles.zip
+        
+        echo "     ✅ wccfiles.zip embedded as data URL"
+        echo "     ✅ Removed separate wccfiles.zip file"
+    else
+        echo "     ⚠️  simple.js not found, skipping zip embedding"
+    fi
+else
+    echo "     ⚠️  wccfiles.zip not found, skipping zip embedding"
+fi
+
+# Final step: Embed simple.js into simple.html for complete self-containment
+if [ -f "simple.js" ] && [ -f "simple.html" ]; then
+    echo "     Embedding simple.js into simple.html..."
+    
+    # Read the JavaScript content
+    JS_CONTENT=$(cat simple.js)
+    
+    # Create a temporary file with the embedded script
+    # We need to escape special characters for sed
+    JS_CONTENT_ESCAPED=$(printf '%s\n' "$JS_CONTENT" | sed 's/[\[\]*^$()+?{|]/\\&/g')
+    
+    # Replace the script src with inline script content
+    # Using a different approach with a temporary file to avoid sed limitations
+    cat simple.html | sed "s|<script type=\"module\" crossorigin src=\"./simple.js\"></script>|<script>|" > temp.html
+    
+    # Insert the JavaScript content after the opening script tag
+    awk '
+        /<script>/ { 
+            print $0
+            while ((getline line < "simple.js") > 0) {
+                print line
+            }
+            print "</script>"
+            next
+        }
+        { print }
+    ' temp.html > simple.html
+    
+    # Clean up
+    rm temp.html simple.js
+    
+    echo "     ✅ simple.js embedded into simple.html"
+    echo "     ✅ Removed separate simple.js file"
+    echo "     🎯 App is now completely self-contained in a single HTML file!"
+else
+    echo "     ⚠️  simple.js or simple.html not found, skipping embedding"
+fi
+
+cd ..
+
 # Step 5: Report results
 echo ""
 echo "🎉 Build completed successfully!"
@@ -71,19 +164,19 @@ echo "🌐 To serve locally, you can use:"
 echo "   cd release && python3 -m http.server 8000"
 echo "   Then open: http://localhost:8000"
 echo ""
-echo "📦 Build artifacts:"
+mkdir -p docs
+cp release/simple.html docs/index.html
+
+echo "📦 Final build artifacts:"
 ls -la release/ 2>/dev/null || echo "   (release directory contents will be shown after build)"
 echo ""
-echo "✨ Done! Both web apps are ready to deploy."
+echo "✨ Done! Simple web app is now a single self-contained HTML file!"
 echo ""
-echo "📱 Available applications:"
-echo "   • Advanced IDE: index.html"
-echo "   • Simple Editor: simple.html"
-
-mkdir -p docs
-cp -r release/* docs/
+echo "📱 Available application:"
+echo "   • Simple Editor: simple.html (complete WebAssembly C compiler in one file)"
 
 echo ""
-echo "🚀 Local testing URLs:"
-echo "   • Advanced: http://localhost:8000/index.html"
-echo "   • Simple:   http://localhost:8000/simple.html"
+echo "🚀 Local testing URL:"
+echo "   • Simple Editor: http://localhost:8000/simple.html"
+echo ""
+echo "💡 Note: You can now open simple.html directly in any browser without a server!"

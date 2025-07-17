@@ -7,7 +7,7 @@ export default defineConfig({
   publicDir: '../../../public',
   build: {
     outDir: resolve(__dirname, 'release'),
-    minify: false,
+    minify: true,
     rollupOptions: {
       input: {
         // Focus on simple webapp only for embedded wcc_runner

@@ -149,29 +149,28 @@
 </head>
 <body>
     <div class="container">
-        <h1>🚀 Simple C Compiler</h1>
+        <h1>C Compiler</h1>
         
         <div class="controls">
-            <button id="runBtn" class="btn">▶️ Run</button>
+            <button id="cRunButton" class="btn">Run</button>
         </div>
         
         <div class="editor-container">
             <div class="panel">
-                <h3>📝 C Source Code</h3>
-                <textarea id="sourceCode" placeholder="Enter your C code here...">// Welcome to Simple C Compiler!
-// Write your C code here and click Run
+                <h3>C Source Code</h3>
+                <textarea id="cSourceCode" placeholder="Enter your C code here...">// Write your C code here and click Run
 
 #include <stdio.h>
 
 int main() {
-    printf("Hello, WebAssembly World!\n");
+    printf("Hello, World!\n");
     return 0;
 }</textarea>
             </div>
             
             <div class="panel">
-                <h3>📺 Output</h3>
-                <textarea id="output" class="output" readonly placeholder="Program output will appear here..."></textarea>
+                <h3>Output</h3>
+                <textarea id="cOutput" class="output" readonly placeholder="Program output will appear here..."></textarea>
             </div>
         </div>
         

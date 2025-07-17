@@ -14,9 +14,9 @@ let isLoaded = false
 // Initialize the application
 async function init() {
   // Get DOM elements
-  sourceTextarea = document.getElementById('sourceCode') as HTMLTextAreaElement
-  outputTextarea = document.getElementById('output') as HTMLTextAreaElement
-  runBtn = document.getElementById('runBtn') as HTMLButtonElement
+  sourceTextarea = document.getElementById('cSourceCode') as HTMLTextAreaElement
+  outputTextarea = document.getElementById('cOutput') as HTMLTextAreaElement
+  runBtn = document.getElementById('cRunButton') as HTMLButtonElement
   statusDiv = document.getElementById('status') as HTMLDivElement
 
   // Set up event listeners
@@ -75,7 +75,7 @@ function clearOutput() {
 
 // Append text to output
 function appendOutput(text: string, isError: boolean = false) {
-  const prefix = isError ? '❌ ' : ''
+  const prefix = isError ? 'ERROR ' : ''
   outputTextarea.value += prefix + text
   // Auto-scroll to bottom
   outputTextarea.scrollTop = outputTextarea.scrollHeight
@@ -144,7 +144,7 @@ async function runCode() {
     
     showStatus('Execution completed!', 'success')
   } catch (error) {
-    appendOutput(`\n❌ Error: ${error}\n`, true)
+    appendOutput(`\nERROR: ${error}\n`, true)
     showStatus('Operation failed', 'error')
     console.error('Execution error:', error)
   } finally {
