@@ -114,40 +114,15 @@ else
     echo "     ⚠️  wccfiles.zip not found, skipping zip embedding"
 fi
 
-# Final step: Embed simple.js into simple.html for complete self-containment
 if [ -f "simple.js" ] && [ -f "simple.html" ]; then
-    echo "     Embedding simple.js into simple.html..."
     
-    # Read the JavaScript content
-    JS_CONTENT=$(cat simple.js)
+    cat simple.html | sed "s|type=\"module\" crossorigin||" > temp.html
     
-    # Create a temporary file with the embedded script
-    # We need to escape special characters for sed
-    JS_CONTENT_ESCAPED=$(printf '%s\n' "$JS_CONTENT" | sed 's/[\[\]*^$()+?{|]/\\&/g')
-    
-    # Replace the script src with inline script content
-    # Using a different approach with a temporary file to avoid sed limitations
-    cat simple.html | sed "s|<script type=\"module\" crossorigin src=\"./simple.js\"></script>|<script>|" > temp.html
-    
-    # Insert the JavaScript content after the opening script tag
-    awk '
-        /<script>/ { 
-            print $0
-            while ((getline line < "simple.js") > 0) {
-                print line
-            }
-            print "</script>"
-            next
-        }
-        { print }
-    ' temp.html > simple.html
     
     # Clean up
-    rm temp.html simple.js
+    rm simple.html
+    mv temp.html index.html
     
-    echo "     ✅ simple.js embedded into simple.html"
-    echo "     ✅ Removed separate simple.js file"
-    echo "     🎯 App is now completely self-contained in a single HTML file!"
 else
     echo "     ⚠️  simple.js or simple.html not found, skipping embedding"
 fi
@@ -165,7 +140,8 @@ echo "   cd release && python3 -m http.server 8000"
 echo "   Then open: http://localhost:8000"
 echo ""
 mkdir -p docs
-cp release/simple.html docs/index.html
+cp release/index.html docs/index.html
+cp release/simple.js docs/simple.js
 
 echo "📦 Final build artifacts:"
 ls -la release/ 2>/dev/null || echo "   (release directory contents will be shown after build)"
