@@ -36,7 +36,9 @@ async function init() {
 
   wccRunner = new WccRunner()
   wccRunner.setConsoleOutFunction((text: string, isError: boolean) => {
-    appendOutput(text, isError)
+    if (!isError) {
+      appendOutput(text, isError);
+    }
   })
 
   try {
@@ -139,7 +141,6 @@ async function runCode() {
     // Run the compiled WebAssembly
     const args = ['a.wasm']
     
-    appendOutput('=== Program Output ===\n')
     await wccRunner.runWasi(compiledPath, args)
     
     showStatus('Execution completed!', 'success')
