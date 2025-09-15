@@ -2283,7 +2283,6 @@ TEST(builtin) {
   EXPECT("builtin popcount", 8, __builtin_popcount(0x000f0f00U));
   EXPECT("builtin popcountl", 8, __builtin_popcountl(0x000f0f00UL));
   EXPECT("builtin popcountll", 8, __builtin_popcountll(0x000f0f00ULL));
-}
 
 #ifndef __NO_FLONUM
   {
@@ -2293,6 +2292,7 @@ TEST(builtin) {
     EXPECT("builtin nan", 0x7ffdbeefcafebabe, u.x);
   }
 #endif
+}
 
 //
 

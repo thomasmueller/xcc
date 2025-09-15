@@ -67,7 +67,7 @@ function test_initializer() {
   compile_error 'undeclared struct init' 'struct Foo foo={12}; int main(){}'
   compile_error 'undeclared struct array init' 'struct Foo arr[]={{1}, {2}, {3}}; int main(){}'
   compile_error 'extern with init' 'extern int x = 123; int main(){}'
-compile_error 'char array init with ptr' 'char *foo = "foo"; int main(){ char bar[] = foo; (void)bar; }'
+  compile_error 'char array init with ptr' 'char *foo = "foo"; int main(){ char bar[] = foo; (void)bar; }'
   compile_error 'global pointer init with undefined' 'char *p = &x; int main(){}'
   compile_error 'global pointer init with other type' 'int x; char *p = &x; int main(){}'
   compile_error 'global pointer init with fixnum' 'void *main = 1234;'
