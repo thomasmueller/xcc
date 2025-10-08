@@ -48,14 +48,12 @@ void gen_clear_local_var(const VarInfo *varinfo);
 void gen_memcpy(const Type *type, VReg *dst, VReg *src);
 
 typedef struct {
-  const Type *type;
+  const VarInfo *varinfo;
   VReg *vreg;
   int index;
 } RegParamInfo;
 
-void enumerate_register_params(
-    Function *func, RegParamInfo iargs[], int max_ireg, RegParamInfo fargs[], int max_freg,
-    int *piarg_count, int *pfarg_count);
+int enumerate_register_params(Function *func, const int max_reg[2], RegParamInfo *args);
 
 bool gen_defun(Function *func);
 void prepare_register_allocation(Function *func);

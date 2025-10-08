@@ -21,8 +21,7 @@
 #define MAX_FREG_ARGS  (8)
 
 const ArchSetting kArchSetting = {
-  .max_reg_args = MAX_REG_ARGS,
-  .max_freg_args = MAX_FREG_ARGS,
+  .max_reg_args = {MAX_REG_ARGS, MAX_FREG_ARGS},
 };
 
 char *im(int64_t x) {
@@ -46,21 +45,24 @@ static int put_vaarg_params(Function *func) {
 #if VAARG_ON_STACK
   return 0;
 #else
-  RegParamInfo iparams[MAX_REG_ARGS];
-  RegParamInfo fparams[MAX_FREG_ARGS];
-  int iparam_count = 0;
-  int fparam_count = 0;
-  enumerate_register_params(func, iparams, MAX_REG_ARGS, fparams, MAX_FREG_ARGS,
-                            &iparam_count, &fparam_count);
+  RegParamInfo params[MAX_REG_ARGS + MAX_FREG_ARGS];
+  const int max_reg_args[2] = {MAX_REG_ARGS, MAX_FREG_ARGS};
+  int param_count = enumerate_register_params(func, max_reg_args, params);
 
   int size = 0;
-  int n = MAX_REG_ARGS - iparam_count;
+  int ngp = 0;
+  for (int i = 0; i < param_count; ++i) {
+    VReg *vreg = params[i].vreg;
+    if (!(vreg->flag & VRF_FLONUM))
+      ++ngp;
+  }
+  int n = MAX_REG_ARGS - ngp;
   if (n > 0) {
     int size_org = n * TARGET_POINTER_SIZE;
     size = ALIGN(n, 2) * TARGET_POINTER_SIZE;
     int offset = size - size_org;
     ADDI(SP, SP, IM(-size));
-    for (int i = iparam_count; i < MAX_REG_ARGS; ++i, offset += TARGET_POINTER_SIZE)
+    for (int i = ngp; i < MAX_REG_ARGS; ++i, offset += TARGET_POINTER_SIZE)
       SD(kRegParam64s[i], IMMEDIATE_OFFSET(offset, SP));
   }
   return size;
@@ -73,59 +75,106 @@ static void move_params_to_assigned(Function *func) {
   extern const char *kFReg64s[];
 
   // Assume fp-parameters are arranged from index 0.
-  #define kFRegParam64s  kFReg64s
+#define kFRegParam64s  kFReg64s
 
-  RegParamInfo iparams[MAX_REG_ARGS];
-  RegParamInfo fparams[MAX_FREG_ARGS];
-  int iparam_count = 0;
-  int fparam_count = 0;
-  enumerate_register_params(func, iparams, MAX_REG_ARGS, fparams, MAX_FREG_ARGS,
-                            &iparam_count, &fparam_count);
+  RegParamInfo params[MAX_REG_ARGS + MAX_FREG_ARGS];
+  const int max_reg_args[2] = {MAX_REG_ARGS, MAX_FREG_ARGS};
+  int param_count = enumerate_register_params(func, max_reg_args, params);
 
   // Generate code to store parameters to the destination.
-  for (int i = 0; i < iparam_count; ++i) {
-    RegParamInfo *p = &iparams[i];
+  for (int i = 0; i < param_count; ++i) {
+    RegParamInfo *p = &params[i];
     VReg *vreg = p->vreg;
-    size_t size = type_size(p->type);
-    int pow = most_significant_bit(size);
-    assert(IS_POWER_OF_2(size) && pow < 4);
-    const char *src = kReg64s[ArchRegParamMapping[p->index]];
-    if (vreg->flag & VRF_SPILLED) {
-      int offset = vreg->frame.offset;
-      assert(offset != 0);
-      const char *dst;
-      if (offset >= -2048) {
-        dst = IMMEDIATE_OFFSET(offset, FP);
-      } else {
-        LI(T0, IM(offset));
-        ADD(T0, T0, FP);
-        dst = IMMEDIATE_OFFSET0(T0);
+    const Type *type = p->varinfo->type;
+    if (vreg == NULL) {
+      // Small struct passed by value: Store to the stack frame.
+      size_t size = type_size(type);
+      if (size <= 0)
+        continue;
+      FrameInfo *fi = p->varinfo->local.frameinfo;
+      int offset = fi->offset;
+      assert(offset < 0);
+      int index = p->index;
+      for (;;) {
+        size_t s;
+        for (int i = VRegSize8; i >= VRegSize1; --i) {
+          s = 1U << i;
+          if (s <= size)
+            break;
+        }
+
+        int pow = most_significant_bit(s);
+        const char *src = kReg64s[ArchRegParamMapping[index]];
+        const char *dst;
+        if (offset >= -2048) {
+          dst = IMMEDIATE_OFFSET(offset, FP);
+        } else {
+          LI(T0, IM(offset));
+          ADD(T0, T0, FP);
+          dst = IMMEDIATE_OFFSET0(T0);
+        }
+        // TODO: Check alignment?
+        switch (pow) {
+        case 0:  SB(src, dst); break;
+        case 1:  SH(src, dst); break;
+        case 2:  SW(src, dst); break;
+        case 3:  SD(src, dst); break;
+        default: assert(false); break;
+        }
+        size -= s;
+        offset += s;
+        if (size <= 0)
+          break;
+        if (s >= TARGET_POINTER_SIZE) {
+          ++index;
+        } else {
+          const char *opr2 = IM(s * TARGET_CHAR_BIT);
+          SRLI(src, src, opr2);
+        }
       }
-      switch (pow) {
-      case 0:  SB(src, dst); break;
-      case 1:  SH(src, dst); break;
-      case 2:  SW(src, dst); break;
-      case 3:  SD(src, dst); break;
-      default: assert(false); break;
-      }
-    } else if (ArchRegParamMapping[p->index] != vreg->phys) {
-      const char *dst = kReg64s[vreg->phys];
-      MV(dst, src);
+
+      continue;
     }
-  }
-  for (int i = 0; i < fparam_count; ++i) {
-    RegParamInfo *p = &fparams[i];
-    VReg *vreg = p->vreg;
-    const char *src = kFRegParam64s[p->index];
-    if (vreg->flag & VRF_SPILLED) {
-      int offset = vreg->frame.offset;
-      assert(offset != 0);
-      assert(offset != 0);
-      FSD(src, IMMEDIATE_OFFSET(offset, FP));
+
+    if (vreg->flag & VRF_FLONUM) {
+      const char *src = kFRegParam64s[p->index];
+      if (vreg->flag & VRF_SPILLED) {
+        int offset = vreg->frame.offset;
+        assert(offset != 0);
+        assert(offset != 0);
+        FSD(src, IMMEDIATE_OFFSET(offset, FP));
+      } else {
+        if (p->index != vreg->phys) {
+          const char *dst = kFReg64s[vreg->phys];
+          FMV_D(dst, src);
+        }
+      }
     } else {
-      if (p->index != vreg->phys) {
-        const char *dst = kFReg64s[vreg->phys];
-        FMV_D(dst, src);
+      size_t size = type_size(type);
+      int pow = most_significant_bit(size);
+      assert(IS_POWER_OF_2(size) && pow < 4);
+      const char *src = kReg64s[ArchRegParamMapping[p->index]];
+      if (vreg->flag & VRF_SPILLED) {
+        int offset = vreg->frame.offset;
+        assert(offset != 0);
+        const char *dst;
+        if (offset >= -2048) {
+          dst = IMMEDIATE_OFFSET(offset, FP);
+        } else {
+          LI(T0, IM(offset));
+          ADD(T0, T0, FP);
+          dst = IMMEDIATE_OFFSET0(T0);
+        }
+        switch (pow) {
+        case 0:  SB(src, dst); break;
+        case 1:  SH(src, dst); break;
+        case 2:  SW(src, dst); break;
+        case 3:  SD(src, dst); break;
+        default: assert(false); break;
+        }
+      } else if (ArchRegParamMapping[p->index] != vreg->phys) {
+        const char *dst = kReg64s[vreg->phys];
+        MV(dst, src);
       }
     }
   }
@@ -211,7 +260,6 @@ void emit_defun_body(Function *func) {
   size_t frame_size = ALIGN(fnbe->frame_size + funcall_work_size, 16);
   bool fp_saved = false;  // Frame pointer saved?
   bool ra_saved = false;  // Return Address register saved?
-  unsigned long used_reg_bits = fnbe->ra->used_reg_bits;
   int vaarg_params_saved = 0;
   if (!no_stmt) {
     if (func->type->func.vaargs) {
@@ -233,11 +281,11 @@ void emit_defun_body(Function *func) {
       SD(FP, IMMEDIATE_OFFSET0(SP));
 
       // FP is saved, so omit from callee save.
-      used_reg_bits &= ~(1UL << GET_FPREG_INDEX());
+      fnbe->ra->used_reg_bits[GPREG] &= ~(1UL << GET_FPREG_INDEX());
     }
 
     // Callee save.
-    push_callee_save_regs(used_reg_bits, fnbe->ra->used_freg_bits);
+    push_callee_save_regs(fnbe->ra->used_reg_bits[GPREG], fnbe->ra->used_reg_bits[1]);
 
     if (fp_saved)
       MV(FP, SP);
@@ -263,7 +311,7 @@ void emit_defun_body(Function *func) {
       else if (frame_size > 0)
         ADDI(SP, SP, IM(frame_size));
 
-      pop_callee_save_regs(used_reg_bits, fnbe->ra->used_freg_bits);
+      pop_callee_save_regs(fnbe->ra->used_reg_bits[GPREG], fnbe->ra->used_reg_bits[FPREG]);
 
       if (fp_saved || ra_saved) {
         LD(FP, IMMEDIATE_OFFSET0(SP));

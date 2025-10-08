@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <stdlib.h>  // malloc
+#include <string.h>
 
 #include "ast.h"
 #include "be_aux.h"
@@ -236,7 +237,8 @@ static VReg *gen_ref_sub(Expr *expr) {
       } else {
         if (is_local_storage(varinfo)) {
 #if STRUCT_ARG_AS_POINTER
-          if (varinfo->storage & VS_PARAM && expr->type->kind == TY_STRUCT) {
+          if (varinfo->storage & VS_PARAM && expr->type->kind == TY_STRUCT &&
+              !is_small_struct(expr->type)) {
             assert(varinfo->type->kind == TY_PTR);  // Already transformed from struct to pointer.
             assert(varinfo->local.vreg != NULL);
             return varinfo->local.vreg;
@@ -357,14 +359,14 @@ static inline void set_call_info(IrCallInfo *call, const Name *label, bool globa
   call->vaarg_start = vaarg_start;
 }
 
+#define ARGF_FLONUM    (1 << 0)
+#define ARGF_FP_AS_GP  (1 << 1)
+
 typedef struct {
   ssize_t offset;
   ssize_t size;
   int reg_index;
-  bool is_flo;
-#if VAARG_FP_AS_GP
-  bool fp_as_gp;
-#endif
+  int flag;
 } ArgInfo;
 
 typedef struct {
@@ -373,23 +375,19 @@ typedef struct {
   ssize_t offset;
   int stack_arg_count;
   int arg_count;
-  int reg_arg_count;
-  int freg_arg_count;
+  int reg_arg_count[2];  // [0]=gp-reg, [1]=fp-reg
 
   // Register arguments.
-  int iregarg;
-  int fregarg;
+  int regarg[2];  // [0]=gp-reg, [1]=fp-reg
 } FuncallWork;
 
 static inline ArgInfo *collect_funargs(const Type *functype, int arg_start, Vector *args, FuncallWork *work, ArgInfo *arg_infos) {
   ssize_t offset = 0;
   int stack_arg_count = 0;
-  int reg_arg_count = 0;
-  int freg_arg_count = 0;
+  int reg_arg_count[2] = {0, 0};
   const int arg_count = args->len;
 
-  int ireg_index = arg_start;
-  int freg_index = 0;
+  int reg_index[2] = {arg_start, 0};  // [0]=gp-reg, [1]=fp-reg
 
   // Check stack arguments.
   for (int i = 0; i < arg_count; ++i) {
@@ -400,81 +398,107 @@ static inline ArgInfo *collect_funargs(const Type *functype, int arg_start, Vect
     const Type *arg_type = arg->type;
     assert(arg_type->kind != TY_ARRAY);
     p->size = type_size(arg_type);
-    p->is_flo = is_flonum(arg_type);
+    if (is_flonum(arg_type))
+      p->flag |= ARGF_FLONUM;
     bool is_vaarg = functype->func.vaargs && functype->func.params != NULL &&
                     i >= functype->func.params->len;
     UNUSED(is_vaarg);
 #if VAARG_FP_AS_GP
-    p->fp_as_gp = false;
-    if (is_vaarg) {
-      p->is_flo = false;
-      p->fp_as_gp = true;
-    }
+    if (is_vaarg)
+      p->flag |= ARGF_FP_AS_GP;
 #endif
+    bool is_flo = (p->flag & (ARGF_FLONUM | ARGF_FP_AS_GP)) == ARGF_FLONUM;
     bool stack_arg = is_stack_param(arg_type) ||
-                     (p->is_flo ? freg_index >= kArchSetting.max_freg_args
-                                : ireg_index >= kArchSetting.max_reg_args);
+                     reg_index[is_flo] >= kArchSetting.max_reg_args[is_flo];
 #if VAARG_ON_STACK
     if (is_vaarg)
       stack_arg = true;
 #endif
+
+    size_t regnum = 1;
+    if (arg_type->kind == TY_STRUCT && is_small_struct(arg_type)) {
+      size_t n = (p->size + TARGET_POINTER_SIZE - 1) / TARGET_POINTER_SIZE;
+      if (reg_index[GPREG] + (int)n <= kArchSetting.max_reg_args[GPREG]) {
+        assert(!is_flo);
+        stack_arg = false;
+        regnum = n;
+      }
+    }
+
     if (stack_arg) {
       offset = ALIGN(offset, align_size(arg_type));
       p->offset = offset;
       offset += ALIGN(p->size, TARGET_POINTER_SIZE);
       ++stack_arg_count;
     } else {
-      if (p->is_flo) {
-        p->reg_index = freg_index++;
-        ++freg_arg_count;
-      } else {
-        p->reg_index = ireg_index++;
-        ++reg_arg_count;
-      }
+      p->reg_index = reg_index[is_flo];
+      reg_index[is_flo] += regnum;
+      reg_arg_count[is_flo] += regnum;
     }
   }
 
   work->offset = offset;
   work->stack_arg_count = stack_arg_count;
   work->arg_count = arg_count;
-  work->reg_arg_count = reg_arg_count;
-  work->freg_arg_count = freg_arg_count;
+  assert(sizeof(work->reg_arg_count) == sizeof(reg_arg_count));
+  memcpy(work->reg_arg_count, reg_arg_count, sizeof(work->reg_arg_count));
 
   return arg_infos;
 }
 
-static inline VReg *gen_funarg(Expr *arg, int i, ArgInfo *arg_infos, FuncallWork *work) {
+static inline VReg *gen_funarg_small_struct(Expr *arg, VReg *vreg, FuncallWork *work) {
+  assert(TARGET_POINTER_SIZE == (1 << VRegSize8));
+  size_t size = type_size(arg->type);
+  size_t n = (size + TARGET_POINTER_SIZE - 1) / TARGET_POINTER_SIZE;
+
+  // Assumed little endian.
+  for (size_t i = n; i-- > 0; ) {
+    VReg *opr = vreg;
+    size_t offset = i * TARGET_POINTER_SIZE;
+    if (offset > 0)
+      opr = new_ir_bop(IR_ADD, vreg, new_const_vreg(offset, VRegSize8), VRegSize8, 0);
+    VReg *loaded = new_ir_load(opr, VRegSize8, VRF_PARAM, 0)->dst;
+
+    int regarg = ++work->regarg[GPREG];
+    int arg_start = work->ret_varinfo != NULL ? 1 : 0;
+    int index = work->reg_arg_count[GPREG] - regarg + arg_start;
+    assert(index < kArchSetting.max_reg_args[GPREG]);
+    new_ir_pusharg(loaded, index);
+  }
+
+  return NULL;
+}
+
+static inline VReg *gen_funarg(Expr *arg, ArgInfo *arg_info, FuncallWork *work) {
   VReg *vreg = gen_expr(arg);
-  const ArgInfo *p = &arg_infos[i];
-  if (p->offset < 0) {
-    if (p->is_flo) {
-      int fregarg = ++work->fregarg;
-      int index = work->freg_arg_count - fregarg;
-      assert(index < kArchSetting.max_freg_args);
-      new_ir_pusharg(vreg, index);
-    } else {
-      const int arg_start = work->ret_varinfo != NULL ? 1 : 0;
-      int iregarg = ++work->iregarg;
-      int index = work->reg_arg_count - iregarg + arg_start;
-      assert(index < kArchSetting.max_reg_args);
-      IR *ir = new_ir_pusharg(vreg, index);
+  if (arg_info->offset < 0) {
+    if (arg->type->kind == TY_STRUCT)
+      return gen_funarg_small_struct(arg, vreg, work);
+
+    bool is_flo = (arg_info->flag & (ARGF_FLONUM | ARGF_FP_AS_GP)) == ARGF_FLONUM;
+    int regarg = ++work->regarg[is_flo];
+    int index = work->reg_arg_count[is_flo] - regarg;
+    if (!is_flo && work->ret_varinfo != NULL)
+      ++index;
+    assert(index < kArchSetting.max_reg_args[is_flo]);
+    IR *ir = new_ir_pusharg(vreg, index);
 #if !VAARG_FP_AS_GP
-      UNUSED(ir);
+    UNUSED(ir);
 #else
-      if (p->fp_as_gp)
-        ir->pusharg.fp_as_gp = true;
+    if (!is_flo && (arg_info->flag & ARGF_FP_AS_GP))
+      ir->pusharg.fp_as_gp = true;
 #endif
-    }
   } else {
     enum VRegSize offset_type = 2;  //{.size = 4, .align = 4};  // TODO:
-    ssize_t ofs = p->offset;
+    ssize_t ofs = arg_info->offset;
     VReg *dst = new_ir_sofs(new_const_vreg(ofs, offset_type))->dst;
-    if (is_stack_param(arg->type)) {
-      gen_memcpy(arg->type, dst, vreg);
-    } else {
+    if (is_prim_type(arg->type)) {
       int flag = is_unsigned(arg->type) ? IRF_UNSIGNED : 0;
       new_ir_store(dst, vreg, flag);
+    } else {
+      gen_memcpy(arg->type, dst, vreg);
     }
+    vreg = NULL;
   }
   return vreg;
 }
@@ -485,10 +509,8 @@ static inline void gen_funargs(Expr *expr, FuncallWork *work) {
   work->offset = 0;
   work->stack_arg_count = 0;
   work->arg_count = 0;
-  work->reg_arg_count = 0;
-  work->freg_arg_count = 0;
-  work->iregarg = 0;
-  work->fregarg = 0;
+  work->reg_arg_count[GPREG] = work->reg_arg_count[FPREG] = 0;
+  work->regarg[GPREG] = work->regarg[FPREG] = 0;
 
   Expr *func = expr->funcall.func;
   const Type *functype = get_callee_type(func->type);
@@ -518,7 +540,7 @@ static inline void gen_funargs(Expr *expr, FuncallWork *work) {
   Vector *args = expr->funcall.args;
   for (int i = arg_count; --i >= 0; ) {
     Expr *arg = args->data[i];
-    VReg *vreg = gen_funarg(arg, i, arg_infos, work);
+    VReg *vreg = gen_funarg(arg, &arg_infos[i], work);
     arg_vregs[i + arg_start] = vreg;
   }
 
@@ -573,7 +595,7 @@ static inline VReg *gen_funcall_sub(Expr *expr, FuncallWork *work) {
   int vaarg_start = !functype->func.vaargs || functype->func.params == NULL ? -1 :
       functype->func.params->len + ret_count;
   set_call_info(callinfo, funcname, global, total_arg_count,
-                work->reg_arg_count + work->freg_arg_count + ret_count,
+                work->reg_arg_count[GPREG] + work->reg_arg_count[FPREG] + ret_count,
                 work->arg_vregs, vaarg_start);
   IR *call = new_ir_call(callinfo, dst, freg);
 

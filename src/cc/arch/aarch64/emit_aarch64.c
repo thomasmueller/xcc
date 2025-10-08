@@ -21,8 +21,7 @@
 #define MAX_FREG_ARGS  (8)
 
 const ArchSetting kArchSetting = {
-  .max_reg_args = MAX_REG_ARGS,
-  .max_freg_args = MAX_FREG_ARGS,
+  .max_reg_args = {MAX_REG_ARGS, MAX_FREG_ARGS},
 };
 
 char *im(int64_t x) {
@@ -92,55 +91,100 @@ static void move_params_to_assigned(Function *func) {
 #define kFRegParam32s  kFReg32s
 #define kFRegParam64s  kFReg64s
 
-  RegParamInfo iparams[MAX_REG_ARGS];
-  RegParamInfo fparams[MAX_FREG_ARGS];
-  int iparam_count = 0;
-  int fparam_count = 0;
-  enumerate_register_params(func, iparams, MAX_REG_ARGS, fparams, MAX_FREG_ARGS,
-                            &iparam_count, &fparam_count);
+  RegParamInfo params[MAX_REG_ARGS + MAX_FREG_ARGS];
+  const int max_reg_args[2] = {MAX_REG_ARGS, MAX_FREG_ARGS};
+  int param_count = enumerate_register_params(func, max_reg_args, params);
+  int reg_index[2] = {0, 0};
 
   // Generate code to store parameters to the destination.
-  for (int i = 0; i < iparam_count; ++i) {
-    RegParamInfo *p = &iparams[i];
+  for (int i = 0; i < param_count; ++i) {
+    RegParamInfo *p = &params[i];
     VReg *vreg = p->vreg;
-    size_t size = type_size(p->type);
-    int pow = most_significant_bit(size);
-    assert(IS_POWER_OF_2(size) && pow < 4);
-    const char *src = kRegSizeTable[pow][ArchRegParamMapping[p->index]];
-    if (vreg->flag & VRF_SPILLED) {
-      int offset = vreg->frame.offset;
-      assert(offset != 0);
-      const char *dst;
-      if (offset >= -256) {
-        dst = IMMEDIATE_OFFSET(FP, offset);
-      } else {
-        mov_immediate(X9, offset, true, false);  // x9 broken.
-        dst = REG_OFFSET(FP, X9, NULL);
+    const Type *type = p->varinfo->type;
+    if (vreg == NULL) {
+      // Small struct passed by value: Store to the stack frame.
+      size_t size = type_size(type);
+      if (size <= 0)
+        continue;
+      FrameInfo *fi = p->varinfo->local.frameinfo;
+      int offset = fi->offset;
+      assert(offset < 0);
+      int index = p->index;
+      for (;;) {
+        size_t s;
+        for (int i = VRegSize8; i >= VRegSize1; --i) {
+          s = 1U << i;
+          if (s <= size)
+            break;
+        }
+
+        int pow = most_significant_bit(s);
+        const char *src = kRegSizeTable[pow][ArchRegParamMapping[index]];
+        const char *dst = IMMEDIATE_OFFSET(FP, offset);
+        // TODO: Check alignment?
+        switch (pow) {
+        case 0:          STRB(src, dst); break;
+        case 1:          STRH(src, dst); break;
+        case 2: case 3:  STR(src, dst); break;
+        default: assert(false); break;
+        }
+        size -= s;
+        offset += s;
+        if (size <= 0)
+          break;
+        if (s >= TARGET_POINTER_SIZE) {
+          ++index;
+        } else {
+          const char *opr2 = IM(s * TARGET_CHAR_BIT);
+          const char *s64 = kRegSizeTable[VRegSize8][ArchRegParamMapping[index]];
+          LSR(s64, s64, opr2);
+        }
       }
-      switch (pow) {
-      case 0:          STRB(src, dst); break;
-      case 1:          STRH(src, dst); break;
-      case 2: case 3:  STR(src, dst); break;
-      default: assert(false); break;
-      }
-    } else if (ArchRegParamMapping[p->index] != vreg->phys) {
-      const char *dst = kRegSizeTable[pow][vreg->phys];
-      MOV(dst, src);
+
+      size_t n = (size + TARGET_POINTER_SIZE - 1) / TARGET_POINTER_SIZE;
+      reg_index[GPREG] += n;
+      continue;
     }
-  }
-  for (int i = 0; i < fparam_count; ++i) {
-    RegParamInfo *p = &fparams[i];
-    VReg *vreg = p->vreg;
-    const char *src = (p->type->flonum.kind >= FL_DOUBLE ? kFRegParam64s : kFRegParam32s)[p->index];
-    if (vreg->flag & VRF_SPILLED) {
-      int offset = vreg->frame.offset;
-      assert(offset != 0);
-      STR(src, IMMEDIATE_OFFSET(FP, offset));
-    } else {
-      if (p->index != vreg->phys) {
-        const char *dst = (p->type->flonum.kind >= FL_DOUBLE ? kFReg64s : kFReg32s)[vreg->phys];
-        FMOV(dst, src);
+
+    if (vreg->flag & VRF_FLONUM) {
+      const char *src = (type->flonum.kind >= FL_DOUBLE ? kFRegParam64s : kFRegParam32s)[p->index];
+      if (vreg->flag & VRF_SPILLED) {
+        int offset = vreg->frame.offset;
+        assert(offset != 0);
+        STR(src, IMMEDIATE_OFFSET(FP, offset));
+      } else {
+        if (p->index != vreg->phys) {
+          const char *dst = (type->flonum.kind >= FL_DOUBLE ? kFReg64s : kFReg32s)[vreg->phys];
+          FMOV(dst, src);
+        }
       }
+      ++reg_index[FPREG];
+    } else {
+      size_t size = type_size(type);
+      int pow = most_significant_bit(size);
+      assert(IS_POWER_OF_2(size) && pow < 4);
+      const char *src = kRegSizeTable[pow][ArchRegParamMapping[p->index]];
+      if (vreg->flag & VRF_SPILLED) {
+        int offset = vreg->frame.offset;
+        assert(offset != 0);
+        const char *dst;
+        if (offset >= -256) {
+          dst = IMMEDIATE_OFFSET(FP, offset);
+        } else {
+          mov_immediate(X9, offset, true, false);  // x9 broken.
+          dst = REG_OFFSET(FP, X9, NULL);
+        }
+        switch (pow) {
+        case 0:          STRB(src, dst); break;
+        case 1:          STRH(src, dst); break;
+        case 2: case 3:  STR(src, dst); break;
+        default: assert(false); break;
+        }
+      } else if (ArchRegParamMapping[p->index] != vreg->phys) {
+        const char *dst = kRegSizeTable[pow][vreg->phys];
+        MOV(dst, src);
+      }
+      ++reg_index[GPREG];
     }
   }
 
@@ -150,12 +194,12 @@ static void move_params_to_assigned(Function *func) {
   bool vaargs = func->type->func.vaargs;
 #endif
   if (vaargs) {
-    for (int i = iparam_count; i < MAX_REG_ARGS; ++i) {
+    for (int i = reg_index[GPREG]; i < MAX_REG_ARGS; ++i) {
       int offset = (i - MAX_REG_ARGS - MAX_FREG_ARGS) * TARGET_POINTER_SIZE;
       STR(kRegSizeTable[3][ArchRegParamMapping[i]], IMMEDIATE_OFFSET(FP, offset));
     }
 #ifndef __NO_FLONUM
-    for (int i = fparam_count; i < MAX_FREG_ARGS; ++i) {
+    for (int i = reg_index[FPREG]; i < MAX_FREG_ARGS; ++i) {
       int offset = (i - MAX_FREG_ARGS) * TARGET_POINTER_SIZE;
       STR(kFRegParam64s[i], IMMEDIATE_OFFSET(FP, offset));
     }
@@ -248,7 +292,6 @@ void emit_defun_body(Function *func) {
   size_t frame_size = ALIGN(fnbe->frame_size + funcall_work_size, 16);
   bool fp_saved = false;  // Frame pointer saved?
   bool lr_saved = false;  // Link register saved?
-  unsigned long used_reg_bits = fnbe->ra->used_reg_bits;
   if (!no_stmt) {
     fp_saved = fnbe->frame_size > 0 || fnbe->ra->flag & RAF_STACK_FRAME;
     assert(fnbe->funcalls == NULL || fnbe->funcalls->len > 0);
@@ -259,11 +302,11 @@ void emit_defun_body(Function *func) {
       STP(FP, LR, PRE_INDEX(SP, -16));
 
       // FP is saved, so omit from callee save.
-      used_reg_bits &= ~(1UL << GET_FPREG_INDEX());
+      fnbe->ra->used_reg_bits[GPREG] &= ~(1UL << GET_FPREG_INDEX());
     }
 
     // Callee save.
-    push_callee_save_regs(used_reg_bits, fnbe->ra->used_freg_bits);
+    push_callee_save_regs(fnbe->ra->used_reg_bits[GPREG], fnbe->ra->used_reg_bits[1]);
 
     if (fp_saved)
       MOV(FP, SP);
@@ -291,7 +334,7 @@ void emit_defun_body(Function *func) {
       else if (frame_size > 0)
         ADD(SP, SP, IM(frame_size));
 
-      pop_callee_save_regs(used_reg_bits, fnbe->ra->used_freg_bits);
+      pop_callee_save_regs(fnbe->ra->used_reg_bits[GPREG], fnbe->ra->used_reg_bits[FPREG]);
 
       if (fp_saved || lr_saved)
         LDP(FP, LR, POST_INDEX(SP, 16));
