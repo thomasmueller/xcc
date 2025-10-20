@@ -56,7 +56,7 @@ static BB *push_break_bb(BB **save) {
   return bb;
 }
 
-static VarInfo *prepare_retvar(Function *func) {
+static inline VarInfo *prepare_retvar(Function *func) {
   // Insert vreg for return value pointer into top of the function scope.
   Type *rettype = func->type->func.ret;
   const Token *retval_token = alloc_dummy_ident();
@@ -65,7 +65,11 @@ static VarInfo *prepare_retvar(Function *func) {
   VarInfo *varinfo = scope_add(top_scope, retval_token, retptrtype, 0);
   VReg *vreg = add_new_vreg(varinfo->type);
   vreg->flag |= VRF_PARAM;
+#if EXTRA_RETURN_STRUCT_REGISTER
+  vreg->reg_param_index = kArchSetting.max_reg_args[GPREG];
+#else
   vreg->reg_param_index = 0;
+#endif
   varinfo->local.vreg = vreg;
   FuncBackend *fnbe = func->extra;
   fnbe->retvarinfo = varinfo;
@@ -96,7 +100,8 @@ static void alloc_variable_registers(Function *func) {
       }
 #endif
       if (!is_prim_type(type)) {
-        FrameInfo *fi = malloc_or_die(sizeof(*fi));
+        FrameInfo *fi = calloc_or_die(sizeof(*fi));
+        fi->size = type_size(type);
         fi->offset = 0;
         varinfo->local.frameinfo = fi;
         continue;
@@ -116,9 +121,12 @@ static void alloc_variable_registers(Function *func) {
   int regcount[2] = {0, 0};
 
   // Handle if return value is on the stack.
-  if (func->type->func.ret->kind == TY_STRUCT) {
+  const Type *rettype = func->type->func.ret;
+  if (rettype->kind == TY_STRUCT && !is_small_struct(rettype)) {
     prepare_retvar(func);
+#if !EXTRA_RETURN_STRUCT_REGISTER
     ++regcount[GPREG];
+#endif
   }
 
   // Count register parameters, or set flag.
@@ -145,16 +153,23 @@ int enumerate_register_params(Function *func, const int max_reg[2], RegParamInfo
   int reg_index[2] = {0, 0};
   int total = 0;
 
-  FuncBackend *fnbe = func->extra;
-  VReg *retval = fnbe->retval;
-  if (retval != NULL) {
-    RegParamInfo *p = &args[total++];
-    p->varinfo = fnbe->retvarinfo;
-    p->vreg = retval;
-    p->index = 0;
-    ++arg_count[GPREG];
-    ++reg_index[GPREG];
-  }
+#define HANDLE_RETURN_STRUCT_REGISTER(idx) do { \
+    FuncBackend *fnbe = func->extra; \
+    VReg *retval = fnbe->retval; \
+    if (retval != NULL) { \
+      RegParamInfo *p = &args[total++]; \
+      assert(is_local_storage(fnbe->retvarinfo)); \
+      p->frameinfo = fnbe->retvarinfo->local.frameinfo; \
+      p->vreg = retval; \
+      p->index = idx; \
+      ++arg_count[GPREG]; \
+      ++reg_index[GPREG]; \
+    } \
+  } while (0)
+
+#if !EXTRA_RETURN_STRUCT_REGISTER
+  HANDLE_RETURN_STRUCT_REGISTER(0);
+#endif
 
   const Vector *params = func->params;
   if (params != NULL) {
@@ -173,13 +188,18 @@ int enumerate_register_params(Function *func, const int max_reg[2], RegParamInfo
         continue;
       reg_index[is_flo] += n;
 
+      assert(is_local_storage(varinfo));
       RegParamInfo *p = &args[total++];
-      p->varinfo = varinfo;
+      p->frameinfo = varinfo->local.frameinfo;
       p->vreg = varinfo->local.vreg;  // Might be NULL (small struct).
       p->index = regidx;
       arg_count[is_flo] += 1;
     }
   }
+
+#if EXTRA_RETURN_STRUCT_REGISTER
+  HANDLE_RETURN_STRUCT_REGISTER(kArchSetting.max_reg_args[GPREG]);
+#endif
   return arg_count[GPREG] + arg_count[FPREG];
 }
 
@@ -209,8 +229,8 @@ void gen_memcpy(const Type *type, VReg *dst, VReg *src) {
   size_t count = size >> elem_vsize;
   assert(count > 0);
   if (count == 1) {
-    VReg *tmp = new_ir_load(src, elem_vsize, to_vflag(type), 0)->dst;
-    new_ir_store(dst, tmp, 0);
+    VReg *tmp = new_ir_load(src, 0, elem_vsize, to_vflag(type), 0)->dst;
+    new_ir_store(dst, 0, tmp, 0);
   } else {
     VReg *srcp = add_new_vreg(&tyVoidPtr);
     new_ir_mov(srcp, src, IRF_UNSIGNED);
@@ -224,9 +244,9 @@ void gen_memcpy(const Type *type, VReg *dst, VReg *src) {
 
     BB *loop_bb = new_bb();
     set_curbb(loop_bb);
-    VReg *tmp = new_ir_load(srcp, elem_vsize, to_vflag(type), 0)->dst;
+    VReg *tmp = new_ir_load(srcp, 0, elem_vsize, to_vflag(type), 0)->dst;
     new_ir_mov(srcp, new_ir_bop(IR_ADD, srcp, vadd, srcp->vsize, IRF_UNSIGNED), IRF_UNSIGNED);  // srcp += elem_size
-    new_ir_store(dstp, tmp, 0);
+    new_ir_store(dstp, 0, tmp, 0);
     new_ir_mov(dstp, new_ir_bop(IR_ADD, dstp, vadd, dstp->vsize, IRF_UNSIGNED), IRF_UNSIGNED);  // dstp += elem_size
     new_ir_mov(vcount, new_ir_bop(IR_SUB, vcount, new_const_vreg(1, vsSize),
                                   vcount->vsize, IRF_UNSIGNED), IRF_UNSIGNED);  // vcount -= 1
@@ -244,7 +264,7 @@ static void gen_clear(const Type *type, VReg *dst) {
   assert(count > 0);
   VReg *vzero = new_const_vreg(0, elem_vtype);
   if (count == 1) {
-    new_ir_store(dst, vzero, 0);
+    new_ir_store(dst, 0, vzero, 0);
   } else {
     VReg *dstp = add_new_vreg(&tyVoidPtr);
     new_ir_mov(dstp, dst, IRF_UNSIGNED);
@@ -256,7 +276,7 @@ static void gen_clear(const Type *type, VReg *dst) {
 
     BB *loop_bb = new_bb();
     set_curbb(loop_bb);
-    new_ir_store(dstp, vzero, 0);
+    new_ir_store(dstp, 0, vzero, 0);
     new_ir_mov(dstp, new_ir_bop(IR_ADD, dstp, vadd, dstp->vsize, IRF_UNSIGNED), IRF_UNSIGNED);  // dstp += elem_size
     new_ir_mov(vcount, new_ir_bop(IR_SUB, vcount, new_const_vreg(1, vsSize),
                                   vcount->vsize, IRF_UNSIGNED), IRF_UNSIGNED);  // vcount -= 1
@@ -330,19 +350,33 @@ static inline void gen_return(Stmt *stmt) {
   FuncBackend *fnbe = curfunc->extra;
   if (stmt->return_.val != NULL) {
     Expr *val = stmt->return_.val;
+    const Type *type = val->type;
     VReg *vreg = gen_expr(val);
-    if (is_prim_type(val->type)) {
-      int flag = is_unsigned(val->type) ? IRF_UNSIGNED : 0;
+    if (is_small_struct(type)) {
+      size_t size = type_size(type);
+      for (size_t o = 0; o < size; o += TARGET_POINTER_SIZE) {
+        size_t s = MIN(size - o, TARGET_POINTER_SIZE);
+        int b = most_significant_bit(s);
+        if (s > (1U << b))
+          ++b;
+        VReg *v = new_ir_load(vreg, o, b, 0, 0)->dst;
+        if (fnbe->result_dst == NULL)
+          new_ir_result(v, 0, o / TARGET_POINTER_SIZE);
+        else
+          new_ir_store(fnbe->result_dst, o, v, 0);
+      }
+    } else if (is_prim_type(type)) {
+      int flag = is_unsigned(type) ? IRF_UNSIGNED : 0;
       if (fnbe->result_dst == NULL)
-        new_ir_result(vreg, flag);
+        new_ir_result(vreg, flag, 0);
       else
         new_ir_mov(fnbe->result_dst, vreg, flag);
-    } else if (val->type->kind != TY_VOID) {
+    } else if (type->kind != TY_VOID) {
       VReg *retval = fnbe->retval;
       if (retval != NULL) {
-        gen_memcpy(val->type, retval, vreg);
+        gen_memcpy(type, retval, vreg);
         if (fnbe->result_dst == NULL)
-          new_ir_result(retval, IRF_UNSIGNED);  // Pointer is unsigned.
+          new_ir_result(retval, IRF_UNSIGNED, 0);  // Pointer is unsigned.
         else
           new_ir_mov(fnbe->result_dst, retval, IRF_UNSIGNED);  // Pointer is unsigned.
       } else {
@@ -772,7 +806,12 @@ void alloc_stack_variables_onto_stack_frame(Function *func) {
 
   bool require_stack_frame = false;
 
-  int arg_start = is_prim_type(func->type->func.ret) ? 0 : 1;
+#if EXTRA_RETURN_STRUCT_REGISTER
+  const int arg_start = 0;
+#else
+  const Type *rettype = func->type->func.ret;
+  const int arg_start = is_prim_type(rettype) || is_small_struct(rettype) ? 0 : 1;
+#endif
   int reg_index[2] = {arg_start, 0};  // [0]=gp-reg, [1]=fp-reg
 
   // Parameters.
@@ -780,8 +819,10 @@ void alloc_stack_variables_onto_stack_frame(Function *func) {
     VarInfo *varinfo = func->params->data[i];
     assert(is_local_storage(varinfo));
     const Type *type = varinfo->type;
-    size_t size = type_size(type), align = align_size(type);
+    size_t align = align_size(type);
     bool is_flo = is_flonum(type);
+    FrameInfo *fi = varinfo->local.frameinfo;
+    size_t size = fi->size;  // type_size(type);
     if (is_small_struct(type)) {
       size_t n = (size + TARGET_POINTER_SIZE - 1) / TARGET_POINTER_SIZE;
       if (reg_index[is_flo] + (int)n <= kArchSetting.max_reg_args[is_flo]) {
@@ -789,7 +830,6 @@ void alloc_stack_variables_onto_stack_frame(Function *func) {
         reg_index[GPREG] += n;
 
         // Allocate stack frame.
-        FrameInfo *fi = varinfo->local.frameinfo;
         frame_size = ALIGN(frame_size + size, align);
         fi->offset = -(int)frame_size;
         continue;
@@ -803,7 +843,6 @@ void alloc_stack_variables_onto_stack_frame(Function *func) {
       size = align = TARGET_POINTER_SIZE;
     }
 
-    FrameInfo *fi = varinfo->local.frameinfo;
     fi->offset = param_offset = ALIGN(param_offset, align);
     param_offset += ALIGN(size, TARGET_POINTER_SIZE);
     require_stack_frame = true;
@@ -823,8 +862,6 @@ void alloc_stack_variables_onto_stack_frame(Function *func) {
       }
 
       assert(varinfo->local.vreg == NULL);
-      FrameInfo *fi = varinfo->local.frameinfo;
-      assert(fi != NULL);
 
       Type *type = varinfo->type;
       size_t size = type_size(type);
@@ -848,6 +885,8 @@ void alloc_stack_variables_onto_stack_frame(Function *func) {
       size_t align = align_size(type);
 
       frame_size = ALIGN(frame_size + size, align);
+      FrameInfo *fi = varinfo->local.frameinfo;
+      assert(fi != NULL);
       fi->offset = -(int)frame_size;
     }
   }
@@ -896,6 +935,7 @@ bool gen_defun(Function *func) {
   fnbe->result_dst = NULL;
   fnbe->funcalls = NULL;
   fnbe->frame_size = 0;
+  fnbe->vaarg_frame_info.size = -1;  // Dummy.
   fnbe->vaarg_frame_info.offset = 0;  // Calculated in later.
   fnbe->stack_work_size = 0;
   fnbe->stack_work_size_vreg = NULL;

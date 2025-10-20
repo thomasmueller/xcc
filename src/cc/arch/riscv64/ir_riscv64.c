@@ -21,6 +21,7 @@ const char *kReg64s[PHYSICAL_REG_MAX] = {
   T0, T1, T2, T3, T4, T5, T6};                            // Caller save
 
 #define GET_A0_INDEX()   0
+#define GET_A1_INDEX()   1
 
 #define CALLEE_SAVE_REG_COUNT  ((int)ARRAY_SIZE(kCalleeSaveRegs))
 static const int kCalleeSaveRegs[] = {8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18};
@@ -29,6 +30,7 @@ static const int kCalleeSaveRegs[] = {8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18};
 static const int kCallerSaveRegs[] = {19, 20, 21, 22, 23, 24, 25};
 
 const int ArchRegParamMapping[] = {0, 1, 2, 3, 4, 5, 6, 7};
+#define ArchRegReturnMapping  ArchRegParamMapping
 
 // Break s1 in store, mod and tjmp
 static const char *kTmpReg = S1;
@@ -43,6 +45,7 @@ const char *kFReg64s[PHYSICAL_FREG_MAX] = {
 #define kFReg32s  kFReg64s
 
 #define GET_FA0_INDEX()   0
+#define GET_FA1_INDEX()   1
 
 #define CALLEE_SAVE_FREG_COUNT  ((int)ARRAY_SIZE(kCalleeSaveFRegs))
 static const int kCalleeSaveFRegs[] = {8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19};
@@ -61,6 +64,7 @@ static unsigned long detect_extra_occupied(RegAlloc *ra, IR *ir) {
 const RegAllocSettings kArchRegAllocSettings = {
   .detect_extra_occupied = detect_extra_occupied,
   .reg_param_mapping = ArchRegParamMapping,
+  .reg_return_mapping = ArchRegReturnMapping,
   {
     {
       .phys_max = PHYSICAL_REG_MAX,
@@ -242,23 +246,29 @@ static void ei_sofs(IR *ir) {
   }
 }
 
+static const char *load_store_dst(VReg *opr, int64_t offset, bool s) {
+  const char *base;
+  if (!s) {
+    assert(!(opr->flag & VRF_SPILLED));
+    base = kReg64s[opr->phys];
+  } else {
+    assert(opr->flag & VRF_SPILLED);
+    base = FP;
+    offset += opr->frame.offset;
+  }
+  if (is_im12(offset)) {
+    return IMMEDIATE_OFFSET(offset, base);
+  } else {
+    LI(kTmpReg, IM(offset));
+    ADD(kTmpReg, kTmpReg, base);
+    return IMMEDIATE_OFFSET0(kTmpReg);
+  }
+}
+
 #define ei_load_s  ei_load
 static void ei_load(IR *ir) {
   assert(!(ir->opr1->flag & VRF_CONST));
-  const char *src;
-  if (ir->kind == IR_LOAD) {
-    assert(!(ir->opr1->flag & VRF_SPILLED));
-    src = IMMEDIATE_OFFSET0(kReg64s[ir->opr1->phys]);
-  } else {
-    assert(ir->opr1->flag & VRF_SPILLED);
-    if (is_im12(ir->opr1->frame.offset)) {
-      src = IMMEDIATE_OFFSET(ir->opr1->frame.offset, FP);
-    } else {
-      LI(kTmpReg, IM(ir->opr1->frame.offset));
-      ADD(kTmpReg, kTmpReg, FP);
-      src = IMMEDIATE_OFFSET0(kTmpReg);
-    }
-  }
+  const char *src = load_store_dst(ir->opr1, ir->load.offset, ir->kind != IR_LOAD);
 
   const char *dst;
   if (ir->dst->flag & VRF_FLONUM) {
@@ -295,20 +305,7 @@ static void ei_load(IR *ir) {
 #define ei_store_s  ei_store
 static void ei_store(IR *ir) {
   assert(!(ir->opr2->flag & VRF_CONST));
-  const char *target;
-  if (ir->kind == IR_STORE) {
-    assert(!(ir->opr2->flag & VRF_SPILLED));
-    target = IMMEDIATE_OFFSET0(kReg64s[ir->opr2->phys]);
-  } else {
-    assert(ir->opr2->flag & VRF_SPILLED);
-    if (is_im12(ir->opr2->frame.offset)) {
-      target = IMMEDIATE_OFFSET(ir->opr2->frame.offset, FP);
-    } else {
-      LI(kTmpReg, IM(ir->opr2->frame.offset));
-      ADD(kTmpReg, kTmpReg, FP);
-      target = IMMEDIATE_OFFSET0(kTmpReg);
-    }
-  }
+  const char *target = load_store_dst(ir->opr2, ir->store.offset, ir->kind != IR_STORE);
   const char *src;
   if (ir->opr1->flag & VRF_FLONUM) {
     switch (ir->opr1->vsize) {
@@ -685,7 +682,13 @@ static void ei_mov(IR *ir) {
 }
 
 static void ei_result(IR *ir) {
-  int dstphys = (ir->opr1->flag & VRF_FLONUM) ? GET_FA0_INDEX() : GET_A0_INDEX();
+  static const int kRegIndices[][2] = {
+    {GET_A0_INDEX(), GET_A1_INDEX()},
+    {GET_FA0_INDEX(), GET_FA1_INDEX()},
+  };
+  bool is_flo = ir->opr1->flag & VRF_FLONUM;
+  assert((size_t)ir->result.index < ARRAY_SIZE(kRegIndices[is_flo]));
+  int dstphys = kRegIndices[is_flo][ir->result.index];
   emit_mov(dstphys, ir->opr1);
 }
 
@@ -924,7 +927,41 @@ static void ei_call(IR *ir) {
   // Resore caller save registers.
   pop_caller_save_regs(ir->call->caller_saves, total);
 
-  if (ir->dst != NULL) {
+  const FrameInfo *fi = ir->call->small_struct_result_frameinfo;
+  if (fi != NULL) {
+    assert(fi->offset <= 0);
+    ssize_t offset = fi->offset;
+
+    size_t size = fi->size;
+    assert(size > 0 && size <= TARGET_POINTER_SIZE * 2);
+
+    static const int kResultRegs[] = {GET_A0_INDEX(), GET_A1_INDEX()};
+    int regidx = 0;
+    for (;;) {
+      int pow = most_significant_bit(MIN(size, TARGET_POINTER_SIZE));
+      const char *src = kReg64s[kResultRegs[regidx]];
+      const char *target = IMMEDIATE_OFFSET(offset, FP);
+      switch (pow) {
+      case 0:  SB(src, target); break;
+      case 1:  SH(src, target); break;
+      case 2:  SW(src, target); break;
+      case 3:  SD(src, target); break;
+      default: assert(false); break;
+      }
+      size_t s = 1U << pow;
+      size -= s;
+      if (size <= 0)
+        break;
+      offset += s;
+      if (pow == 3) {
+        ++regidx;
+      } else {
+        const char *reg = kReg64s[kResultRegs[regidx]];
+        LI(kTmpReg, IM(s * TARGET_CHAR_BIT));
+        SRL(reg, reg, kTmpReg);
+      }
+    }
+  } else if (ir->dst != NULL) {
     if (ir->dst->flag & VRF_FLONUM) {
       if (ir->dst->phys != GET_FA0_INDEX()) {
         FMV_D(kFReg64s[ir->dst->phys], FA0);

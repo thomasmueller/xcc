@@ -2,6 +2,7 @@
 #include "codegen.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>  // malloc
 #include <string.h>
 
@@ -304,7 +305,7 @@ static VReg *gen_variable(Expr *expr) {
 
       VReg *vreg = gen_lval(expr);
       int irflag = is_unsigned(expr->type) ? IRF_UNSIGNED : 0;
-      IR *ir = new_ir_load(vreg, to_vsize(expr->type),
+      IR *ir = new_ir_load(vreg, 0, to_vsize(expr->type),
                            to_vflag_with_storage(expr->type, varinfo->storage), irflag);
       return ir->dst;
     }
@@ -373,23 +374,27 @@ typedef struct {
   VarInfo *ret_varinfo;
   VReg **arg_vregs;
   ssize_t offset;
+  int arg_start;
   int stack_arg_count;
   int arg_count;
   int reg_arg_count[2];  // [0]=gp-reg, [1]=fp-reg
+  bool ret_small_struct;
 
   // Register arguments.
   int regarg[2];  // [0]=gp-reg, [1]=fp-reg
 } FuncallWork;
 
-static inline ArgInfo *collect_funargs(const Type *functype, int arg_start, Vector *args, FuncallWork *work, ArgInfo *arg_infos) {
+static inline ArgInfo *collect_funargs(const Type *functype, Vector *args, FuncallWork *work, ArgInfo *arg_infos) {
   ssize_t offset = 0;
   int stack_arg_count = 0;
   int reg_arg_count[2] = {0, 0};
   const int arg_count = args->len;
 
-  int reg_index[2] = {arg_start, 0};  // [0]=gp-reg, [1]=fp-reg
+  int reg_index[2] = {work->arg_start, 0};  // [0]=gp-reg, [1]=fp-reg
 
   // Check stack arguments.
+  int vaarg_start = functype->func.vaargs && functype->func.params != NULL
+      ? functype->func.params->len : INT_MAX;
   for (int i = 0; i < arg_count; ++i) {
     ArgInfo *p = &arg_infos[i];
     p->reg_index = -1;
@@ -400,9 +405,7 @@ static inline ArgInfo *collect_funargs(const Type *functype, int arg_start, Vect
     p->size = type_size(arg_type);
     if (is_flonum(arg_type))
       p->flag |= ARGF_FLONUM;
-    bool is_vaarg = functype->func.vaargs && functype->func.params != NULL &&
-                    i >= functype->func.params->len;
-    UNUSED(is_vaarg);
+    bool is_vaarg = i >= vaarg_start;
 #if VAARG_FP_AS_GP
     if (is_vaarg)
       p->flag |= ARGF_FP_AS_GP;
@@ -410,13 +413,9 @@ static inline ArgInfo *collect_funargs(const Type *functype, int arg_start, Vect
     bool is_flo = (p->flag & (ARGF_FLONUM | ARGF_FP_AS_GP)) == ARGF_FLONUM;
     bool stack_arg = is_stack_param(arg_type) ||
                      reg_index[is_flo] >= kArchSetting.max_reg_args[is_flo];
-#if VAARG_ON_STACK
-    if (is_vaarg)
-      stack_arg = true;
-#endif
 
     size_t regnum = 1;
-    if (arg_type->kind == TY_STRUCT && is_small_struct(arg_type)) {
+    if (arg_type->kind == TY_STRUCT && is_small_struct(arg_type) && !is_vaarg) {
       size_t n = (p->size + TARGET_POINTER_SIZE - 1) / TARGET_POINTER_SIZE;
       if (reg_index[GPREG] + (int)n <= kArchSetting.max_reg_args[GPREG]) {
         assert(!is_flo);
@@ -424,6 +423,10 @@ static inline ArgInfo *collect_funargs(const Type *functype, int arg_start, Vect
         regnum = n;
       }
     }
+#if VAARG_ON_STACK
+    if (is_vaarg)
+      stack_arg = true;
+#endif
 
     if (stack_arg) {
       offset = ALIGN(offset, align_size(arg_type));
@@ -453,15 +456,10 @@ static inline VReg *gen_funarg_small_struct(Expr *arg, VReg *vreg, FuncallWork *
 
   // Assumed little endian.
   for (size_t i = n; i-- > 0; ) {
-    VReg *opr = vreg;
-    size_t offset = i * TARGET_POINTER_SIZE;
-    if (offset > 0)
-      opr = new_ir_bop(IR_ADD, vreg, new_const_vreg(offset, VRegSize8), VRegSize8, 0);
-    VReg *loaded = new_ir_load(opr, VRegSize8, VRF_PARAM, 0)->dst;
+    VReg *loaded = new_ir_load(vreg, i * TARGET_POINTER_SIZE, VRegSize8, VRF_PARAM, 0)->dst;
 
     int regarg = ++work->regarg[GPREG];
-    int arg_start = work->ret_varinfo != NULL ? 1 : 0;
-    int index = work->reg_arg_count[GPREG] - regarg + arg_start;
+    int index = work->reg_arg_count[GPREG] - regarg + work->arg_start;
     assert(index < kArchSetting.max_reg_args[GPREG]);
     new_ir_pusharg(loaded, index);
   }
@@ -478,8 +476,10 @@ static inline VReg *gen_funarg(Expr *arg, ArgInfo *arg_info, FuncallWork *work) 
     bool is_flo = (arg_info->flag & (ARGF_FLONUM | ARGF_FP_AS_GP)) == ARGF_FLONUM;
     int regarg = ++work->regarg[is_flo];
     int index = work->reg_arg_count[is_flo] - regarg;
-    if (!is_flo && work->ret_varinfo != NULL)
+#if !EXTRA_RETURN_STRUCT_REGISTER
+    if (!is_flo && work->ret_varinfo != NULL && !work->ret_small_struct)
       ++index;
+#endif
     assert(index < kArchSetting.max_reg_args[is_flo]);
     IR *ir = new_ir_pusharg(vreg, index);
 #if !VAARG_FP_AS_GP
@@ -494,7 +494,7 @@ static inline VReg *gen_funarg(Expr *arg, ArgInfo *arg_info, FuncallWork *work) 
     VReg *dst = new_ir_sofs(new_const_vreg(ofs, offset_type))->dst;
     if (is_prim_type(arg->type)) {
       int flag = is_unsigned(arg->type) ? IRF_UNSIGNED : 0;
-      new_ir_store(dst, vreg, flag);
+      new_ir_store(dst, 0, vreg, flag);
     } else {
       gen_memcpy(arg->type, dst, vreg);
     }
@@ -507,8 +507,10 @@ static inline void gen_funargs(Expr *expr, FuncallWork *work) {
   work->ret_varinfo = NULL;
   work->arg_vregs = NULL;
   work->offset = 0;
+  work->arg_start = 0;
   work->stack_arg_count = 0;
   work->arg_count = 0;
+  work->ret_small_struct = is_small_struct(expr->type);
   work->reg_arg_count[GPREG] = work->reg_arg_count[FPREG] = 0;
   work->regarg[GPREG] = work->regarg[FPREG] = 0;
 
@@ -521,15 +523,18 @@ static inline void gen_funargs(Expr *expr, FuncallWork *work) {
     const Token *token = alloc_dummy_ident();
     Type *type = expr->type;
     ret_varinfo = scope_add(curscope, token, type, 0);
-    FrameInfo *fi = malloc_or_die(sizeof(*fi));
+    FrameInfo *fi = calloc_or_die(sizeof(*fi));
+    fi->size = type_size(type);
     fi->offset = 0;
     ret_varinfo->local.frameinfo = fi;
   }
   work->ret_varinfo = ret_varinfo;
 
-  const int arg_start = ret_varinfo != NULL ? 1 : 0;
+#if !EXTRA_RETURN_STRUCT_REGISTER
+  work->arg_start = ret_varinfo != NULL && !work->ret_small_struct ? 1 : 0;
+#endif
   ArgInfo *arg_infos = calloc_or_die(sizeof(*arg_infos) * expr->funcall.args->len);
-  collect_funargs(functype, arg_start, expr->funcall.args, work, arg_infos);
+  collect_funargs(functype, expr->funcall.args, work, arg_infos);
 
   const int arg_count = work->arg_count;
   int total_arg_count = arg_count + (ret_varinfo != NULL ? 1 : 0);
@@ -541,13 +546,18 @@ static inline void gen_funargs(Expr *expr, FuncallWork *work) {
   for (int i = arg_count; --i >= 0; ) {
     Expr *arg = args->data[i];
     VReg *vreg = gen_funarg(arg, &arg_infos[i], work);
-    arg_vregs[i + arg_start] = vreg;
+    arg_vregs[i + work->arg_start] = vreg;
   }
 
-  if (ret_varinfo != NULL) {
+  if (ret_varinfo != NULL && !work->ret_small_struct) {
     VReg *dst = new_ir_bofs(ret_varinfo->local.frameinfo)->dst;
+#if EXTRA_RETURN_STRUCT_REGISTER
+    new_ir_pusharg(dst, kArchSetting.max_reg_args[GPREG]);
+    arg_vregs[total_arg_count - 1] = dst;
+#else
     new_ir_pusharg(dst, 0);
     arg_vregs[0] = dst;
+#endif
   }
 
   free(arg_infos);
@@ -574,6 +584,11 @@ static inline VReg *gen_funcall_sub(Expr *expr, FuncallWork *work) {
   callinfo->arg_count = arg_count - stack_arg_count;
   callinfo->living_pregs = 0;
   callinfo->caller_saves = NULL;
+  if (work->ret_small_struct) {
+    assert(ret_varinfo != NULL && is_local_storage(ret_varinfo));
+    assert(ret_varinfo->local.frameinfo->size == type_size(expr->type));
+    callinfo->small_struct_result_frameinfo = ret_varinfo->local.frameinfo;
+  }
 
   VReg *dst = NULL;
   Type *type = expr->type;
@@ -610,6 +625,18 @@ static inline VReg *gen_funcall_sub(Expr *expr, FuncallWork *work) {
   if (funcalls == NULL)
     fnbe->funcalls = funcalls = new_vector();
   vec_push(funcalls, expr);
+
+  if (ret_varinfo != NULL) {
+    if (work->ret_small_struct) {
+      dst = new_ir_bofs(ret_varinfo->local.frameinfo)->dst;
+    }
+#if EXTRA_RETURN_STRUCT_REGISTER
+    else {
+      assert(total_arg_count > 0);
+      dst = work->arg_vregs[total_arg_count - 1];
+    }
+#endif
+  }
 
   return dst;
 }
@@ -678,7 +705,7 @@ static VReg *gen_deref(Expr *expr) {
   // array, struct and func values are handled as a pointer.
   if (is_prim_type(expr->type)) {
     int irflag = is_unsigned(expr->type) ? IRF_UNSIGNED : 0;
-    vreg = new_ir_load(vreg, to_vsize(expr->type), to_vflag(expr->type), irflag)->dst;
+    vreg = new_ir_load(vreg, 0, to_vsize(expr->type), to_vflag(expr->type), irflag)->dst;
   }
   return vreg;
 }
@@ -699,7 +726,7 @@ static VReg *gen_member(Expr *expr) {
   VReg *result = vreg;
   if (is_prim_type(expr->type)) {
     int irflag = is_unsigned(expr->type) ? IRF_UNSIGNED : 0;
-    result = new_ir_load(vreg, to_vsize(expr->type), to_vflag(expr->type), irflag)->dst;
+    result = new_ir_load(vreg, 0, to_vsize(expr->type), to_vflag(expr->type), irflag)->dst;
   }
   return result;
 }
@@ -739,7 +766,7 @@ static VReg *gen_assign_sub(Expr *lhs, Expr *rhs) {
   case TY_FLONUM:
     {
       int flag = is_unsigned(rhs->type) ? IRF_UNSIGNED : 0;
-      new_ir_store(dst, src, flag);
+      new_ir_store(dst, 0, src, flag);
     }
     break;
   case TY_STRUCT:
@@ -784,7 +811,7 @@ static VReg *gen_expr_incdec(Expr *expr) {
     }
   } else {
     lval = gen_lval(target);
-    val = new_ir_load(lval, vsize, to_vflag(expr->type), flag)->dst;
+    val = new_ir_load(lval, 0, vsize, to_vflag(expr->type), flag)->dst;
     if (IS_POST(expr))
       before = val;
   }
@@ -796,7 +823,7 @@ static VReg *gen_expr_incdec(Expr *expr) {
       new_const_vreg(expr->type->kind == TY_PTR ? type_size(expr->type->pa.ptrof) : 1, vsize);
   VReg *after = new_ir_bop(kOpAddSub[IS_DEC(expr)], val, addend, vsize, flag);
   if (varinfo != NULL)  new_ir_mov(varinfo->local.vreg, after, flag);
-  else                  new_ir_store(lval, after, flag);
+  else                  new_ir_store(lval, 0, after, flag);
   return before != NULL ? before : after;
 #undef IS_POST
 #undef IS_DEC
@@ -897,11 +924,18 @@ static VReg *gen_inlined(Expr *expr) {
   Type *rettype = expr->type;
   VReg *dst = NULL;
   if (rettype->kind != TY_VOID) {
-    if (!is_prim_type(rettype)) {
-      // Receive as its pointer.
-      rettype = ptrof(rettype);
+    if (is_small_struct(rettype)) {
+      const VarInfo *varinfo = expr->inlined.ret_varinfo;
+      assert(varinfo != NULL);
+      dst = new_ir_bofs(varinfo->local.frameinfo)->dst;
+    } else {
+      if (!is_prim_type(rettype)) {
+        // Receive as its pointer.
+        rettype = ptrof(rettype);
+      }
+      dst = add_new_vreg(rettype);
     }
-    fnbe->result_dst = dst = add_new_vreg(rettype);
+    fnbe->result_dst = dst;
   }
 
   gen_block(embedded);

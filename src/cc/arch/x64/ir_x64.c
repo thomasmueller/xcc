@@ -35,6 +35,7 @@ static const int kCalleeSaveRegs[] = {7, 8, 9, 10, 11, 12};
 static const int kCallerSaveRegs[] = {13, 14};
 
 const int ArchRegParamMapping[] = {1, 2, 3, 4, 5, 6};
+const int ArchRegReturnMapping[] = {GET_AREG_INDEX(), GET_DREG_INDEX()};
 
 #define kReg8s   (kRegSizeTable[0])
 #define kReg32s  (kRegSizeTable[2])
@@ -47,6 +48,7 @@ const char *kFReg64s[PHYSICAL_FREG_MAX] = {
   XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15};
 
 #define GET_XMM0_INDEX()   0
+#define GET_XMM1_INDEX()   1
 
 #define CALLER_SAVE_FREG_COUNT  ((int)ARRAY_SIZE(kCallerSaveFRegs))
 static const int kCallerSaveFRegs[] = {8, 9, 10, 11, 12, 13, 14, 15};
@@ -78,6 +80,7 @@ static unsigned long detect_extra_occupied(RegAlloc *ra, IR *ir) {
 const RegAllocSettings kArchRegAllocSettings = {
   .detect_extra_occupied = detect_extra_occupied,
   .reg_param_mapping = ArchRegParamMapping,
+  .reg_return_mapping = ArchRegReturnMapping,
   {
     {
       .phys_max = PHYSICAL_REG_MAX,
@@ -259,21 +262,26 @@ static void ei_sofs(IR *ir) {
   LEA(OFFSET_INDIRECT(ir->opr1->fixnum, RSP, NULL, 1), kReg64s[ir->dst->phys]);
 }
 
+static const char *load_store_dst(VReg *opr, int64_t offset, bool s) {
+  const char *base;
+  if (opr->flag & VRF_CONST) {
+    assert(!s);
+    return fmt("0x%x", offset + opr->fixnum);
+  } else if (!s) {
+    assert(!(opr->flag & VRF_SPILLED));
+    base = kReg64s[opr->phys];
+  } else {
+    assert(!(opr->flag & VRF_CONST));
+    assert(opr->flag & VRF_SPILLED);
+    base = RBP;
+    offset += opr->frame.offset;
+  }
+  return OFFSET_INDIRECT(offset, base, NULL, 1);
+}
+
 #define ei_load_s  ei_load
 static void ei_load(IR *ir) {
-  const char *src;
-  if (ir->kind == IR_LOAD) {
-    if (ir->opr1->flag & VRF_CONST) {
-      src = fmt("0x%x", ir->opr1->fixnum);
-    } else {
-      assert(!(ir->opr1->flag & VRF_SPILLED));
-      src = INDIRECT(kReg64s[ir->opr1->phys], NULL, 1);
-    }
-  } else {
-    assert(!(ir->opr1->flag & VRF_CONST));
-    assert(ir->opr1->flag & VRF_SPILLED);
-    src = OFFSET_INDIRECT(ir->opr1->frame.offset, RBP, NULL, 1);
-  }
+  const char *src = load_store_dst(ir->opr1, ir->load.offset, ir->kind != IR_LOAD);
 
   if (ir->dst->flag & VRF_FLONUM) {
     switch (ir->dst->vsize) {
@@ -291,19 +299,7 @@ static void ei_load(IR *ir) {
 
 #define ei_store_s  ei_store
 static void ei_store(IR *ir) {
-  const char *target;
-  if (ir->kind == IR_STORE) {
-    if (ir->opr2->flag & VRF_CONST) {
-      target = fmt("0x%x", ir->opr2->fixnum);
-    } else {
-      assert(!(ir->opr2->flag & VRF_SPILLED));
-      target = INDIRECT(kReg64s[ir->opr2->phys], NULL, 1);
-    }
-  } else {
-    assert(!(ir->opr2->flag & VRF_CONST));
-    assert(ir->opr2->flag & VRF_SPILLED);
-    target = OFFSET_INDIRECT(ir->opr2->frame.offset, RBP, NULL, 1);
-  }
+  const char *target = load_store_dst(ir->opr2, ir->store.offset, ir->kind != IR_STORE);
 
   if (ir->opr1->flag & VRF_FLONUM) {
     switch (ir->opr1->vsize) {
@@ -788,7 +784,13 @@ static void ei_mov(IR *ir) {
 }
 
 static void ei_result(IR *ir) {
-  int dstphys = (ir->opr1->flag & VRF_FLONUM) ? GET_XMM0_INDEX() : GET_AREG_INDEX();
+  static const int kRegIndices[][2] = {
+    {GET_AREG_INDEX(), GET_DREG_INDEX()},
+    {GET_XMM0_INDEX(), GET_XMM1_INDEX()},
+  };
+  bool is_flo = ir->opr1->flag & VRF_FLONUM;
+  assert((size_t)ir->result.index < ARRAY_SIZE(kRegIndices[is_flo]));
+  int dstphys = kRegIndices[is_flo][ir->result.index];
   emit_mov(dstphys, ir->opr1);
 }
 
@@ -1011,7 +1013,34 @@ static void ei_call(IR *ir) {
   // Resore caller save registers.
   pop_caller_save_regs(ir->call->caller_saves, total);
 
-  if (ir->dst != NULL) {
+  const FrameInfo *fi = ir->call->small_struct_result_frameinfo;
+  if (fi != NULL) {
+    assert(fi->offset <= 0);
+    ssize_t offset = fi->offset;
+
+    size_t size = fi->size;
+    assert(size > 0 && size <= TARGET_POINTER_SIZE * 2);
+
+    int regidx = 0;
+    for (;;) {
+      assert(regidx < (int)ARRAY_SIZE(ArchRegReturnMapping));
+      int pow = most_significant_bit(MIN(size, TARGET_POINTER_SIZE));
+      const char *src = kRegSizeTable[pow][ArchRegReturnMapping[regidx]];
+      const char *target = OFFSET_INDIRECT(offset, RBP, NULL, 1);
+      MOV(src, target);
+      size_t s = 1U << pow;
+      size -= s;
+      if (size <= 0)
+        break;
+      offset += s;
+      if (pow == 3) {
+        ++regidx;
+      } else {
+        const char *reg = kReg64s[ArchRegReturnMapping[regidx]];
+        SHR(IM(s * TARGET_CHAR_BIT), reg);
+      }
+    }
+  } else if (ir->dst != NULL) {
     if (ir->dst->flag & VRF_FLONUM) {
       if (ir->dst->phys != GET_XMM0_INDEX()) {
         switch (ir->dst->vsize) {
