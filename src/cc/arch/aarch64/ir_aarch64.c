@@ -366,13 +366,13 @@ static void ei_iofs(IR *ir) {
 static void ei_sofs(IR *ir) {
   assert(ir->opr1->flag & VRF_CONST);
   const char *dst = kReg64s[ir->dst->phys];
-  int ofs = ir->opr1->fixnum;
-  if (ofs == 0) {
+  int64_t offset = ir->opr1->fixnum;
+  if (offset == 0) {
     MOV(dst, SP);
-  } else if (is_im13_addsubimm(ofs)) {
-    ADD(dst, SP, IM(ofs));
+  } else if (is_im13_addsubimm(offset)) {
+    ADD(dst, SP, IM(offset));
   } else {
-    mov_immediate(dst, ofs, true, false);
+    mov_immediate(dst, offset, true, false);
     ADD(dst, dst, SP);
   }
 }
@@ -1025,13 +1025,14 @@ static void ei_keep(IR *ir) {
 static void ei_asm(IR *ir) {
   Vector *templates = ir->asm_.templates;
   Vector *registers = ir->additional_operands;
+  int dst_exists = ir->dst != NULL;
   for (int i = 0, n = templates->len; i < n; i += 2) {
     const char *str = templates->data[i];
     emit_asm_raw(str);
     if (i + 1 < n) {
       uintptr_t index = (uintptr_t)templates->data[i + 1];
-      assert(index < (uintptr_t)registers->len);
-      VReg *value = registers->data[index];
+      assert(index < (uintptr_t)(registers->len + dst_exists));
+      VReg *value = dst_exists && index == 0 ? ir->dst : registers->data[index - dst_exists];
       assert(!(value->flag & VRF_FLONUM));  // TODO:
       if (value->flag & VRF_CONST) {
         emit_asm_raw(IM(value->fixnum));

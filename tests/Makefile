@@ -159,8 +159,10 @@ test-std-valtest:
 WCC:=../wcc
 WCC_TESTS:=valtest dvaltest fvaltest goto_wcc_test test-wcc-goto-invalid
 
+EMCC:=emcc
+
 .PHONY: test-wcc
-test-wcc:	test-wcc-sh $(foreach D, $(WCC_TESTS), $(addprefix test-wcc-,$(D))) test-wcc-examples
+test-wcc:	test-wcc-sh $(foreach D, $(WCC_TESTS), $(addprefix test-wcc-,$(D))) test-wcc-linktest test-wcc-examples
 	@echo 'All tests PASS!'
 
 .PHONY: test-wcc-sh
@@ -170,6 +172,16 @@ test-wcc-sh:
 	@XCC="$(WCC)" RE_SKIP='\/\/-WCC' \
 		AOUT="$(AWASM)" RUN_AOUT="../tool/runwasi $(AWASM)" \
 		./test.sh
+
+.PHONY:	test-wcc-linktest
+test-wcc-linktest: #linktest.wasm # $(XCC)
+	@if which $(EMCC) > /dev/null; then \
+		$(MAKE) linktest.wasm && \
+		echo '## Link test' && \
+		../tool/runwasi linktest.wasm; \
+	else \
+		echo '## Link test: skip'; \
+	fi
 
 .PHONY: test-wcc-examples
 test-wcc-examples:
@@ -207,3 +219,7 @@ test-wcc-goto:
 	@XCC="$(WCC)" \
 		AOUT="$(AWASM)" RUN_AOUT="../tool/runwasi $(AWASM)" \
 		./goto_wcc_test.sh
+
+linktest.wasm: link_main.c link_sub.c
+	$(WCC) -c -fcommon -olink_main.o -Wall -Werror link_main.c
+	emcc -o $@ link_sub.c link_main.o

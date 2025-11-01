@@ -153,7 +153,7 @@ Expr *new_expr_funcall(const Token *token, const Type *functype, Expr *func, Vec
   Expr *expr = new_expr(EX_FUNCALL, functype->func.ret, token);
   expr->funcall.func = func;
   expr->funcall.args = args;
-  expr->funcall.info = NULL;
+  expr->funcall.fcinfo = NULL;
   return expr;
 }
 
@@ -163,7 +163,6 @@ Expr *new_expr_inlined(const Token *token, const Name *name, Type *rettype, Vect
   expr->inlined.funcname = name;
   expr->inlined.args = args;
   expr->inlined.embedded = embedded;
-  expr->inlined.ret_varinfo = NULL;
   return expr;
 }
 

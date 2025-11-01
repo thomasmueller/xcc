@@ -280,14 +280,12 @@ typedef struct Expr {
       struct Expr *func;
       Vector *args;  // <Expr*>
       // codegen
-      struct FuncallInfo *info;
+      struct FuncallInfo *fcinfo;
     } funcall;
     struct {
       const Name *funcname;
       Vector *args;  // <Expr*>
       struct Stmt *embedded;  // Must be block statement.
-      // codegen
-      const VarInfo *ret_varinfo;  // Used only if returns small struct.
     } inlined;
     struct {
       struct Expr *var;

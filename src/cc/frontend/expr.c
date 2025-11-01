@@ -133,7 +133,7 @@ Expr *make_cast(Type *type, const Token *token, Expr *sub, bool is_explicit) {
   // On x64, cannot cast from double to uint64_t directly.
   size_t dst_size = type_size(type);
   if (is_flonum(sub->type) &&
-      is_fixnum(type->kind) && type->fixnum.is_unsigned && dst_size >= 8) {
+      is_fixnum(type) && type->fixnum.is_unsigned && dst_size >= 8) {
     // Transform from (uint64_t)flonum
     //   to: (flonum <= INT64_MAX) ? (int64_t)flonum
     //                             : ((int64_t)(flonum - (INT64_MAX + 1UL)) ^ (1L << 63))
@@ -217,10 +217,14 @@ static Expr *reduce_refer_deref_add(Expr *expr, Type *subtype, Expr *lhs, Fixnum
                           new_expr_fixlit(sub->type, sub->token, sub->fixnum + rhs));
   } else if (lhs->kind == EX_ADD && lhs->bop.rhs->kind == EX_FIXNUM) {
     // *(((lhs->lhs) + (lhs->rhs)) + rhs) => *(lhs->lhs + (lhs->rhs + rhs))
-    return new_expr_unary(EX_DEREF, expr->type, expr->token,
-                          new_expr_bop(EX_ADD, subtype, lhs->token, lhs->bop.lhs,
-                                       new_expr_fixlit(lhs->bop.rhs->type, lhs->bop.rhs->token,
-                                                       lhs->bop.rhs->fixnum + rhs)));
+    Expr *p = lhs->bop.lhs;
+    Fixnum offset = lhs->bop.rhs->fixnum + rhs;
+    if (offset == 0)
+      p = make_cast(subtype, lhs->token, p, true);
+    else
+      p = new_expr_bop(EX_ADD, subtype, lhs->token, p,
+                       new_expr_fixlit(lhs->bop.rhs->type, lhs->bop.rhs->token, offset));
+    return new_expr_unary(EX_DEREF, expr->type, expr->token, p);
   }
   return NULL;
 }
@@ -246,35 +250,24 @@ Expr *reduce_refer(Expr *expr) {
 
       // Transform member access to pointer dereference, only if target is referenceable.
       // target->field => *(target + offset(field))
-      Type *type = target->type;
       switch (target->kind) {
       case EX_VAR:
-#if STRUCT_ARG_AS_POINTER
-        if (type->kind == TY_STRUCT) {
-          VarInfo *varinfo = scope_find(target->var.scope, target->var.name, NULL);
-          assert(varinfo != NULL);
-          if (varinfo->storage & VS_PARAM && !is_small_struct(type)) {  // The parameter is passed by reference.
-            if (varinfo->type->kind == TY_PTR) {
-              assert(varinfo->type->pa.ptrof == type);
-              target->type = type = varinfo->type;
-            } else {
-              // The type in scope is modified in `gen` phase,
-              // so it might be remained as `struct`.
-              assert(same_type(type, varinfo->type));
-              target->type = type = ptrof(type);
-            }
-          }
-        }
-#endif
-        // Fallthrough
       case EX_DEREF:
-        if (type->kind == TY_STRUCT) {
-          // target.field => (&target)->field
-          target = new_expr_unary(EX_REF, ptrof(type), target->token, target);
+        {
+          Type *type = target->type;
+          if (type->kind == TY_STRUCT) {
+            // target.field => (&target)->field
+            target = new_expr_unary(EX_REF, ptrof(type), target->token, target);
+          }
+          Expr *p;
+          Type *ptype = ptrof(minfo->type);
+          if (minfo->offset == 0)
+            p = make_cast(ptype, expr->token, target, true);
+          else
+            p = new_expr_bop(EX_ADD, ptype, expr->token, target,
+                             new_expr_fixlit(&tySize, expr->token, minfo->offset));
+          return new_expr_unary(EX_DEREF, minfo->type, expr->token, p);
         }
-        return new_expr_unary(EX_DEREF, minfo->type, expr->token,
-                              new_expr_bop(EX_ADD, ptrof(minfo->type), expr->token, target,
-                                           new_expr_fixlit(&tySize, expr->token, minfo->offset)));
       default:
         // ex. funcall().x cannot be taken its reference, so keep the expression.
         break;
@@ -520,7 +513,7 @@ Expr *new_expr_num_bop(enum ExprKind kind, const Token *tok, Expr *lhs, Expr *rh
   } while (0);
 
   if ((kind == EX_DIV || kind == EX_MOD) && is_const(rhs) &&
-      is_fixnum(rhs->type->kind) && rhs->fixnum == 0) {
+      is_fixnum(rhs->type) && rhs->fixnum == 0) {
     parse_error(PE_WARNING, rhs->token, "Divide by 0");
   }
 
@@ -528,9 +521,9 @@ Expr *new_expr_num_bop(enum ExprKind kind, const Token *tok, Expr *lhs, Expr *rh
 }
 
 Expr *new_expr_int_bop(enum ExprKind kind, const Token *tok, Expr *lhs, Expr *rhs) {
-  if (!is_fixnum(lhs->type->kind))
+  if (!is_fixnum(lhs->type))
     parse_error(PE_FATAL, lhs->token, "int type expected");
-  if (!is_fixnum(rhs->type->kind))
+  if (!is_fixnum(rhs->type))
     parse_error(PE_FATAL, rhs->token, "int type expected");
   return new_expr_num_bop(kind, tok, lhs, rhs);
 }
@@ -602,7 +595,7 @@ Expr *new_expr_addsub(enum ExprKind kind, const Token *tok, Expr *lhs, Expr *rhs
     cast_numbers(&lhs, &rhs, true);
     type = lhs->type;
   } else if (ptr_or_array(ltype)) {
-    if (is_fixnum(rtype->kind)) {
+    if (is_fixnum(rtype)) {
       type = ltype;
       if (ltype->kind == TY_ARRAY)
         type = array_to_ptr(ltype);
@@ -641,7 +634,7 @@ Expr *new_expr_addsub(enum ExprKind kind, const Token *tok, Expr *lhs, Expr *rhs
           new_expr_fixlit(&tySSize, tok, type_size(ltype->pa.ptrof)));
     }
   } else if (ptr_or_array(rtype)) {
-    if (kind == EX_ADD && is_fixnum(ltype->kind)) {
+    if (kind == EX_ADD && is_fixnum(ltype)) {
       type = rhs->type;
       if (type->kind == TY_ARRAY)
         type = array_to_ptr(type);
@@ -661,15 +654,21 @@ Expr *new_expr_addsub(enum ExprKind kind, const Token *tok, Expr *lhs, Expr *rhs
   if (type == NULL) {
     parse_error(PE_NOFATAL, tok, "Cannot apply `%.*s'", (int)(tok->end - tok->begin), tok->begin);
     type = ltype;  // Dummy
-  } else if (ptr_or_array(ltype) && is_const(lhs) && is_const(rhs)) {
-    assert(lhs->kind == EX_FIXNUM);
-    if (kind == EX_ADD) {
-      lhs->fixnum += rhs->fixnum;
-    } else {
-      assert(kind == EX_SUB);
-      lhs->fixnum -= rhs->fixnum;
+  } else if (ptr_or_array(ltype)) {
+    if (is_const(rhs)) {
+      if (is_const(lhs)) {
+        assert(lhs->kind == EX_FIXNUM);
+        if (kind == EX_ADD) {
+          lhs->fixnum += rhs->fixnum;
+        } else {
+          assert(kind == EX_SUB);
+          lhs->fixnum -= rhs->fixnum;
+        }
+        return lhs;
+      } else if (rhs->fixnum == 0) {
+        return lhs;
+      }
     }
-    return lhs;
   }
   return new_expr_bop(kind, type, tok, lhs, rhs);
 }
@@ -818,7 +817,7 @@ Expr *new_expr_cmp(enum ExprKind kind, const Token *tok, Expr *lhs, Expr *rhs) {
   {
     Type *lt = lhs->type, *rt = rhs->type;
     if (is_number(lt) && is_number(rt)) {
-      if (is_fixnum(lt->kind) && is_fixnum(rt->kind)) {
+      if (is_fixnum(lt) && is_fixnum(rt)) {
         if (lt->fixnum.kind < FX_INT)
           lhs = promote_to_int(lhs);
         if (rt->fixnum.kind < FX_INT)
@@ -1093,7 +1092,7 @@ static Expr *calc_assign_with(const Token *tok, Expr *lhs, Expr *rhs) {
     {
       Type *ltype = lhs->type;
       Type *rtype = rhs->type;
-      if (!is_fixnum(ltype->kind) || !is_fixnum(rtype->kind))
+      if (!is_fixnum(ltype) || !is_fixnum(rtype))
         parse_error(PE_FATAL, tok, "Cannot use `%.*s' except numbers.",
                     (int)(tok->end - tok->begin), tok->begin);
       return new_expr_bop(kind, ltype, tok, lhs, rhs);

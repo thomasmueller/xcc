@@ -95,9 +95,8 @@ static void alloc_variable_registers(Function *func) {
       varinfo->local.frameinfo = NULL;
       Type *type = varinfo->type;
 #if STRUCT_ARG_AS_POINTER
-      if (varinfo->storage & VS_PARAM && type->kind == TY_STRUCT && !is_small_struct(type)) {
-        varinfo->type = type = ptrof(type);  // Caution! Overwrite type as its pointer.
-      }
+      if (varinfo->storage & VS_PARAM && type->kind == TY_STRUCT && !is_small_struct(type))
+        type = &tyVoidPtr;
 #endif
       if (!is_prim_type(type)) {
         FrameInfo *fi = calloc_or_die(sizeof(*fi));
@@ -178,9 +177,13 @@ int enumerate_register_params(Function *func, const int max_reg[2], RegParamInfo
       const Type *type = varinfo->type;
       size_t n = 1;
       if (is_stack_param(type)) {
+#if STRUCT_ARG_AS_POINTER
+        type = &tyVoidPtr;
+#else
         if (type->kind != TY_STRUCT || !is_small_struct(type))
           continue;
         n = (type_size(type) + TARGET_POINTER_SIZE - 1) / TARGET_POINTER_SIZE;
+#endif
       }
       bool is_flo = is_flonum(type);
       int regidx = reg_index[is_flo];
@@ -293,7 +296,6 @@ static inline void gen_asm(Stmt *stmt) {
     const AsmArg *arg = stmt->asm_.outputs->data[0];
     assert(arg->expr->kind == EX_VAR);
     output = gen_expr(arg->expr);
-    vec_push(registers, output);
   }
   if (stmt->asm_.inputs != NULL) {
     for (int i = 0; i < stmt->asm_.inputs->len; ++i) {
@@ -352,38 +354,32 @@ static inline void gen_return(Stmt *stmt) {
     Expr *val = stmt->return_.val;
     const Type *type = val->type;
     VReg *vreg = gen_expr(val);
-    if (is_small_struct(type)) {
-      size_t size = type_size(type);
-      for (size_t o = 0; o < size; o += TARGET_POINTER_SIZE) {
-        size_t s = MIN(size - o, TARGET_POINTER_SIZE);
-        int b = most_significant_bit(s);
-        if (s > (1U << b))
-          ++b;
-        VReg *v = new_ir_load(vreg, o, b, 0, 0)->dst;
-        if (fnbe->result_dst == NULL)
+    VReg *result_dst = fnbe->result_dst;
+    if (result_dst == NULL) {  // Not inlining.
+      if (is_small_struct(type)) {
+        size_t size = type_size(type);
+        for (size_t o = 0; o < size; o += TARGET_POINTER_SIZE) {
+          size_t s = MIN(size - o, TARGET_POINTER_SIZE);
+          int b = most_significant_bit(s);
+          if (s > (1U << b))
+            ++b;
+          VReg *v = new_ir_load(vreg, o, b, 0, 0)->dst;
           new_ir_result(v, 0, o / TARGET_POINTER_SIZE);
-        else
-          new_ir_store(fnbe->result_dst, o, v, 0);
-      }
-    } else if (is_prim_type(type)) {
-      int flag = is_unsigned(type) ? IRF_UNSIGNED : 0;
-      if (fnbe->result_dst == NULL)
+        }
+      } else if (is_prim_type(type)) {
+        int flag = is_unsigned(type) ? IRF_UNSIGNED : 0;
         new_ir_result(vreg, flag, 0);
-      else
-        new_ir_mov(fnbe->result_dst, vreg, flag);
-    } else if (type->kind != TY_VOID) {
-      VReg *retval = fnbe->retval;
-      if (retval != NULL) {
+      } else if (type->kind != TY_VOID) {
+        VReg *retval = fnbe->retval;
+        assert(retval != NULL);
         gen_memcpy(type, retval, vreg);
-        if (fnbe->result_dst == NULL)
-          new_ir_result(retval, IRF_UNSIGNED, 0);  // Pointer is unsigned.
-        else
-          new_ir_mov(fnbe->result_dst, retval, IRF_UNSIGNED);  // Pointer is unsigned.
-      } else {
-        // Embedding inline function: lval (struct pointer) is returned.
-        assert(fnbe->result_dst != NULL);
-        new_ir_mov(fnbe->result_dst, vreg, IRF_UNSIGNED);
+        new_ir_result(retval, IRF_UNSIGNED, 0);  // Pointer is unsigned.
       }
+    } else {  // Inlining.
+      // Primitive            : return its value
+      // Non-primitive(struct): return its pointer
+      int flag = !is_prim_type(type) || is_unsigned(type) ? IRF_UNSIGNED : 0;
+      new_ir_mov(result_dst, vreg, flag);
     }
   }
   new_ir_jmp(fnbe->ret_bb);
@@ -702,7 +698,12 @@ void prepare_register_allocation(Function *func) {
         continue;
       }
 
+#if STRUCT_ARG_AS_POINTER
+      assert(is_prim_type(varinfo->type) ||
+             (varinfo->type->kind == TY_STRUCT && varinfo->storage & VS_PARAM));
+#else
       assert(is_prim_type(varinfo->type));
+#endif
       if (vreg->flag & (VRF_FORCEMEMORY | VRF_STACK_PARAM)) {
         spill_vreg(vreg);
         require_stack_frame = true;
@@ -834,7 +835,11 @@ void alloc_stack_variables_onto_stack_frame(Function *func) {
         fi->offset = -(int)frame_size;
         continue;
       }
-    } else if (!is_stack_param(type)) {
+    } else if (!is_stack_param(type)
+#if STRUCT_ARG_AS_POINTER
+               || (varinfo->storage & VS_PARAM)
+#endif
+    ) {
       assert(varinfo->local.vreg != NULL);
       if (!(varinfo->local.vreg->flag & VRF_STACK_PARAM)) {
         reg_index[is_flo] += 1;

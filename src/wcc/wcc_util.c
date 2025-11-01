@@ -1,3 +1,4 @@
+#include "../config.h"
 #include "wcc.h"
 
 #include <assert.h>
@@ -27,9 +28,9 @@ Vector *init_funcs;
 int compile_unit_flag;
 
 uint32_t get_indirect_function_index(const Name *name) {
-  FuncInfo *info = table_get(&indirect_function_table, name);
-  assert(info != NULL && info->indirect_index > 0);
-  return info->indirect_index;
+  FuncInfo *finfo = table_get(&indirect_function_table, name);
+  assert(finfo != NULL && finfo->indirect_index > 0);
+  return finfo->indirect_index;
 }
 
 GVarInfo *register_gvar_info(const Name *name, VarInfo *varinfo) {
@@ -163,6 +164,7 @@ size_t calc_funcall_work_size(Expr *expr) {
   Vector *args = expr->funcall.args;
 
   size_t work_size = 0;
+  size_t indirect_size = 0;
   for (int i = 0; i < param_count; ++i) {
     Expr *arg = args->data[i];
     const Type *type = arg->type;
@@ -176,13 +178,18 @@ size_t calc_funcall_work_size(Expr *expr) {
     if (d > 0) {
       for (int i = 0; i < d; ++i) {
         Expr *arg = args->data[i + param_count];
-        const Type *t = arg->type;
-        assert(!(t->kind == TY_FIXNUM && t->fixnum.kind < FX_INT));
-        work_size = ALIGN(work_size, align_size(t)) + type_size(t);
+        const Type *type = arg->type;
+        assert(!(type->kind == TY_FIXNUM && type->fixnum.kind < FX_INT));
+        size_t size = type_size(type), align = align_size(type);
+        if (is_stack_param(type)) {
+          indirect_size += ALIGN(indirect_size, align) + size;
+          size = align = TARGET_POINTER_SIZE;
+        }
+        work_size = ALIGN(work_size, align) + size;
       }
     }
   }
-  return ALIGN(work_size, 8);
+  return ALIGN(work_size + indirect_size, 8);
 }
 
 const Type *get_small_struct_elem_type(const Type *type) {

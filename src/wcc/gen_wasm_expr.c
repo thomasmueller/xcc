@@ -26,9 +26,7 @@ extern int cur_depth;
 unsigned char get_func_ret_wtype(const Type *rettype) {
   if (is_small_struct(rettype))
     rettype = get_small_struct_elem_type(rettype);
-  return rettype->kind == TY_VOID ? WT_VOID
-         : is_prim_type(rettype)  ? to_wtype(rettype)
-                                  : WT_I32;  // Pointer.
+  return is_prim_type(rettype)  ? to_wtype(rettype) : WT_VOID;
 }
 
 void gen_load(const Type *type) {
@@ -36,7 +34,7 @@ void gen_load(const Type *type) {
   case TY_FIXNUM:
   case TY_PTR:
     {
-      bool u = !is_fixnum(type->kind) || type->fixnum.is_unsigned;
+      bool u = !is_fixnum(type) || type->fixnum.is_unsigned;
       switch (type_size(type)) {
       case 1:  ADD_CODE(u ? OP_I32_LOAD8_U : OP_I32_LOAD8_S, 0, 0); break;
       case 2:  ADD_CODE(u ? OP_I32_LOAD16_U : OP_I32_LOAD16_S, 1, 0); break;
@@ -81,7 +79,7 @@ void gen_store(const Type *type) {
 static void gen_arith(enum ExprKind kind, const Type *type) {
   assert(is_number(type) || ptr_or_array(type));
   int index = 0;
-  bool is_unsigned = is_fixnum(type->kind) && type->fixnum.is_unsigned;
+  bool is_unsigned = is_fixnum(type) && type->fixnum.is_unsigned;
   if (is_flonum(type)) {
     assert(kind < EX_MOD);
     index = type->flonum.kind >= FL_DOUBLE ? 3 : 2;
@@ -164,7 +162,7 @@ static void gen_cast_to(const Type *dst, Type *src) {
         };
         int d = type_size(dst);
         int index = (d > I32_SIZE ? 2 : 0) + (src->flonum.kind >= FL_DOUBLE ? 1 : 0);
-        bool du = !is_fixnum(dst->kind) || dst->fixnum.is_unsigned;
+        bool du = !is_fixnum(dst) || dst->fixnum.is_unsigned;
         ADD_CODE(OpTable[du][index]);
       }
       return;
@@ -181,7 +179,7 @@ static void gen_cast_to(const Type *dst, Type *src) {
         };
         int s = type_size(src);
         int index = (dst->flonum.kind >= FL_DOUBLE ? 2 : 0) + (s > I32_SIZE ? 1 : 0);
-        bool su = !is_fixnum(src->kind) || src->fixnum.is_unsigned;
+        bool su = !is_fixnum(src) || src->fixnum.is_unsigned;
         ADD_CODE(OpTable[su][index]);
       }
       return;
@@ -226,57 +224,96 @@ static void gen_ternary(Expr *expr, bool needval) {
 typedef struct {
   Expr *lspvar;
   size_t offset;
-  size_t vaarg_offset;
-  int param_count;
+  size_t indirect_offset;
   bool vaargs;
 } FuncallWork;
 
-static inline void gen_funarg(Expr *arg, int i, FuncallWork *work) {
+static Expr *gen_struct_funarg(Expr *arg, FuncallWork *work, size_t offset) {
   Expr *lspvar = work->lspvar;
   const Type *type = arg->type;
-  bool vaarg = i >= work->param_count;
-  if (!vaarg && is_small_struct(type)) {
-    size_t size = type_size(type);
-    assert(IS_POWER_OF_2(size));
+  assert(lspvar != NULL);
+  Expr *dst = lspvar;
+  size_t size = type_size(type);
+  if (size > 0) {
+    // _memcpy(local.sp + offset, &arg, size);
+    if (offset != 0)
+      dst = new_expr_bop(EX_ADD, &tyVoidPtr, NULL, lspvar, new_expr_fixlit(&tySize, NULL, offset));
+    gen_expr(dst, true);
+    gen_expr(arg, true);
+
+    ADD_CODE(OP_I32_CONST);
+    ADD_LEB128(size);
+    ADD_CODE(OP_0xFC, OPFC_MEMORY_COPY, 0, 0);
+  }
+  return dst;
+}
+
+static inline void gen_funarg_param(Expr *arg, FuncallWork *work) {
+  const Type *type = arg->type;
+  if (is_small_struct(type)) {
+    assert(IS_POWER_OF_2(type_size(type)));
     gen_expr(arg, true);
     const Type *etype = get_small_struct_elem_type(type);
     assert(is_prim_type(etype));
     gen_load(etype);
   } else if (is_stack_param(type)) {
-    assert(lspvar != NULL);
-    size_t size = type_size(type);
-    if (size > 0) {
-      size_t offset = ALIGN(work->offset, align_size(type));
-      // _memcpy(global.sp + sarg_offset, &arg, size);
-      Expr *src = lspvar;
-      if (offset != 0)
-        src = new_expr_bop(EX_ADD, &tySize, NULL, lspvar, new_expr_fixlit(&tySize, NULL, offset));
-      gen_expr(src, true);
-      gen_expr(arg, true);
-
-      ADD_CODE(OP_I32_CONST);
-      ADD_LEB128(size);
-      ADD_CODE(OP_0xFC, OPFC_MEMORY_COPY, 0, 0);  // src, dst
-      work->offset = offset + size;
-    }
-  } else if (!vaarg) {
-    gen_expr(arg, true);
-  } else {
-    // *(global.sp + offset) = arg
     size_t offset = ALIGN(work->offset, align_size(type));
-    if (offset != 0) {
-      gen_expr(new_expr_bop(EX_ADD, &tySize, NULL, lspvar,
-                            new_expr_fixlit(&tySize, NULL, offset)),
-               true);
-    } else {
-      gen_expr(lspvar, true);
-    }
-    assert(!(type->kind == TY_FIXNUM && type->fixnum.kind < FX_INT));
     work->offset = offset + type_size(type);
-
+    Expr *ptr = gen_struct_funarg(arg, work, offset);
+    assert(ptr->type->kind == TY_PTR);
+    gen_expr(ptr, true);
+  } else {
     gen_expr(arg, true);
-    gen_store(type);
   }
+}
+
+static inline void gen_funarg_vaarg(Expr *arg, FuncallWork *work) {
+  const Type *type = arg->type;
+  if (is_stack_param(type)) {
+    size_t size = type_size(type);
+    size_t indirect_offset = (work->indirect_offset - size) & -align_size(type);
+    work->indirect_offset = indirect_offset;
+    Expr *indirect = gen_struct_funarg(arg, work, indirect_offset);
+
+    // Store indirect-offset to vaarg.
+    arg = indirect;
+    type = indirect->type;
+    assert(type->kind == TY_PTR);
+  }
+
+  Expr *lspvar = work->lspvar;
+  // *(local.sp + offset) = arg
+  Expr *dst = lspvar;
+  size_t offset = ALIGN(work->offset, align_size(type));
+  if (offset != 0)
+    dst = new_expr_bop(EX_ADD, &tySize, NULL, lspvar, new_expr_fixlit(&tySize, NULL, offset));
+  gen_expr(dst, true);
+  assert(!(type->kind == TY_FIXNUM && type->fixnum.kind < FX_INT));
+  work->offset = offset + type_size(type);
+
+  gen_expr(arg, true);
+  gen_store(type);
+}
+
+static inline Expr *gen_fun_ret_buf(Expr *expr) {
+  assert(expr->kind == EX_FUNCALL);
+  assert(expr->funcall.fcinfo != NULL);
+  const VarInfo *ret_varinfo = expr->funcall.fcinfo->varinfo;
+  assert(ret_varinfo != NULL);
+  const Token *ident = ret_varinfo->ident;
+
+  assert(curscope != NULL);
+  Scope *scope;
+  VarInfo *vi = scope_find(curscope, ident->ident, &scope);
+  assert(scope != NULL && vi == ret_varinfo);
+  UNUSED(vi);
+
+  Expr *func = expr->funcall.func;
+  Type *functype = get_callee_type(func->type);
+  Type *rettype = functype->func.ret;
+  Expr *retvar = new_expr_variable(ident->ident, rettype, ident, scope);
+  gen_lval(retvar);
+  return retvar;
 }
 
 static inline void gen_funargs(Expr *expr) {
@@ -288,49 +325,43 @@ static inline void gen_funargs(Expr *expr) {
   assert(functype != NULL);
   int param_count = functype->func.params != NULL ? functype->func.params->len : 0;
 
-  size_t work_size = calc_funcall_work_size(expr);
+  FuncallWork work;
+  work.lspvar = NULL;
+  work.offset = 0;
+  work.vaargs = functype->func.vaargs;
 
-  Expr *lspvar = NULL;
+  size_t work_size = calc_funcall_work_size(expr);
   if (work_size > 0) {
     FuncInfo *finfo = table_get(&func_info_table, curfunc->ident->ident);
     assert(finfo != NULL && finfo->lspname != NULL);
-    lspvar = new_expr_variable(finfo->lspname, &tyVoidPtr, NULL, curfunc->scopes->data[0]);
+    work.lspvar = new_expr_variable(finfo->lspname, &tyVoidPtr, NULL, curfunc->scopes->data[0]);
   }
+  work.indirect_offset = work_size;
 
   const Type *rettype = functype->func.ret;
   bool ret_param = rettype->kind != TY_VOID && !is_prim_type(rettype) && !is_small_struct(rettype);
-  if (ret_param) {
-    assert(curfunc != NULL);
-    assert(expr->funcall.info != NULL);
-    VarInfo *varinfo = expr->funcall.info->varinfo;
-    assert(varinfo != NULL);
-    // &ret_buf
-    Expr *e = new_expr_variable(varinfo->ident->ident, varinfo->type, NULL,
-                                curfunc->scopes->data[0]);
-    gen_lval(e);
-  }
+  if (ret_param)
+    gen_fun_ret_buf(expr);
 
-  FuncallWork work;
-  work.lspvar = lspvar;
-  work.offset = 0;
-  work.vaarg_offset = 0;
-  work.param_count = param_count;
-  work.vaargs = functype->func.vaargs;
+  size_t vaarg_top_offset = 0;
   for (int i = 0; i < arg_count; ++i) {
-    if (work.vaargs && i == work.param_count)
-      work.vaarg_offset = work.offset;
+    if (work.vaargs && i == param_count)
+      vaarg_top_offset = work.offset;
 
     Expr *arg = args->data[i];
-    gen_funarg(arg, i, &work);
+    if (i < param_count)
+      gen_funarg_param(arg, &work);
+    else
+      gen_funarg_vaarg(arg, &work);
   }
 
   if (functype->func.vaargs) {
     // Top of vaargs.
     if (arg_count > param_count) {
-      gen_expr(lspvar, true);
-      if (work.vaarg_offset != 0) {
+      gen_expr(work.lspvar, true);
+      if (vaarg_top_offset != 0) {
         ADD_CODE(OP_I32_CONST);
-        ADD_LEB128(work.vaarg_offset);
+        ADD_LEB128(vaarg_top_offset);
         ADD_CODE(OP_I32_ADD);
       }
     } else {
@@ -340,8 +371,8 @@ static inline void gen_funargs(Expr *expr) {
 }
 
 static inline void gen_funcall_by_name(const Name *funcname) {
-  FuncInfo *info = table_get(&func_info_table, funcname);
-  assert(info != NULL);
+  FuncInfo *finfo = table_get(&func_info_table, funcname);
+  assert(finfo != NULL);
   ADD_CODE(OP_CALL);
 
   FuncExtra *extra = curfunc->extra;
@@ -350,9 +381,9 @@ static inline void gen_funcall_by_name(const Name *funcname) {
   ri->type = R_WASM_FUNCTION_INDEX_LEB;
   ri->offset = code->len;
   ri->addend = 0;
-  ri->index = info->index;
+  ri->index = finfo->index;
   vec_push(extra->reloc_code, ri);
-  ADD_VARUINT32(info->index);
+  ADD_VARUINT32(finfo->index);
 }
 
 static inline void gen_funcall_indirect(Expr *func) {
@@ -385,20 +416,11 @@ static inline void gen_funcall_indirect(Expr *func) {
 
 static void gen_funcall(Expr *expr, bool needval) {
   Expr *func = expr->funcall.func;
-  Type *rettype = func->type->func.ret;
+  Type *functype = get_callee_type(func->type);
+  Type *rettype = functype->func.ret;
   Expr *retvar = NULL;
-  if (is_small_struct(rettype)) {
-    assert(expr->funcall.info != NULL);
-    const VarInfo *ret_varinfo = expr->funcall.info->varinfo;
-    assert(ret_varinfo != NULL);
-    const Token *ident = ret_varinfo->ident;
-    Scope *scope;
-    VarInfo *vi = scope_find(curscope, ident->ident, &scope);
-    assert(scope != NULL && vi == ret_varinfo);
-    UNUSED(vi);
-    retvar = new_expr_variable(ident->ident, rettype, ident, scope);
-    gen_lval(retvar);
-  }
+  if (is_small_struct(rettype))
+    retvar = gen_fun_ret_buf(expr);
 
   BuiltinFunctionProc *proc;
   if (func->kind == EX_VAR && is_global_scope(func->var.scope) &&
@@ -416,9 +438,15 @@ static void gen_funcall(Expr *expr, bool needval) {
     gen_store(get_small_struct_elem_type(rettype));
     if (needval)
       gen_lval(retvar);
-  } else {
-    if (!needval && expr->type->kind != TY_VOID)
-      ADD_CODE(OP_DROP);
+  } else if (rettype->kind != TY_VOID) {
+    if (is_prim_type(rettype)) {
+      if (!needval)
+        ADD_CODE(OP_DROP);
+    } else {
+      assert(rettype->kind == TY_STRUCT);
+      if (needval)
+        gen_fun_ret_buf(expr);
+    }
   }
 }
 
@@ -466,17 +494,17 @@ static void gen_ref_sub(Expr *expr) {
       if (is_global_scope(scope) || !is_local_storage(varinfo)) {
         if (varinfo->type->kind == TY_FUNC) {
           ADD_CODE(OP_I32_CONST);
-          FuncInfo *info = table_get(&indirect_function_table, expr->var.name);
-          assert(info != NULL && info->indirect_index > 0);
+          FuncInfo *finfo = table_get(&indirect_function_table, expr->var.name);
+          assert(finfo != NULL && finfo->indirect_index > 0);
           FuncExtra *extra = curfunc->extra;
           DataStorage *code = extra->code;
           RelocInfo *ri = calloc_or_die(sizeof(*ri));
           ri->type = R_WASM_TABLE_INDEX_SLEB;
           ri->offset = code->len;
-          ri->index = info->index;  // Assume that symtab index is same as function index.
+          ri->index = finfo->index;  // Assume that symtab index is same as function index.
           vec_push(extra->reloc_code, ri);
 
-          ADD_VARINT32(info->indirect_index);
+          ADD_VARINT32(finfo->indirect_index);
         } else {
           GVarInfo *info = get_gvar_info(expr);
           assert(info != NULL);
@@ -494,6 +522,13 @@ static void gen_ref_sub(Expr *expr) {
         }
       } else {
         VReg *vreg = varinfo->local.vreg;
+        if (varinfo->storage & VS_PARAM &&
+            is_stack_param(expr->type) && !is_small_struct(expr->type)) {
+          // struct parameter is passed by pointer.
+          ADD_CODE(OP_LOCAL_GET);
+          ADD_ULEB128(vreg->prim.local_index);
+          break;
+        }
         gen_bpofs(vreg->non_prim.offset);
       }
     }
@@ -846,7 +881,7 @@ static void gen_assign_sub(Expr *lhs, Expr *rhs) {
         gen_expr(rhs, true);
         ADD_CODE(OP_I32_CONST);
         ADD_LEB128(size);
-        ADD_CODE(OP_0xFC, OPFC_MEMORY_COPY, 0, 0);  // src, dst
+        ADD_CODE(OP_0xFC, OPFC_MEMORY_COPY, 0, 0);
       }
     }
     break;
@@ -967,14 +1002,7 @@ static void gen_inlined(Expr *expr, bool needval) {
   cur_depth = 1;
 
   const Type *rettype = expr->type;
-  const VarInfo *ret_varinfo = expr->inlined.ret_varinfo;
-  if (ret_varinfo != NULL && needval) {
-    assert(is_small_struct(rettype));
-    VReg *vreg = ret_varinfo->local.vreg;
-    gen_bpofs(vreg->non_prim.offset);
-  }
-
-  unsigned char wt = get_func_ret_wtype(rettype);
+  unsigned char wt = rettype->kind == TY_STRUCT ? WT_I32 /*Pointer*/ : get_func_ret_wtype(rettype);
   ADD_CODE(OP_BLOCK, wt); {
     gen_stmt(embedded, true);
 
@@ -989,16 +1017,8 @@ static void gen_inlined(Expr *expr, bool needval) {
     }
   } ADD_CODE(OP_END);
 
-  if (ret_varinfo != NULL) {
-    if (needval) {
-      gen_store(get_small_struct_elem_type(rettype));
-      VReg *vreg = ret_varinfo->local.vreg;
-      gen_bpofs(vreg->non_prim.offset);
-    }
-  } else {
-    if (wt != WT_VOID && !needval)
-      ADD_CODE(OP_DROP);
-  }
+  if (wt != WT_VOID && !needval)
+    ADD_CODE(OP_DROP);
 
   cur_depth = bak_depth;
   finfo->flag = bak_flag;

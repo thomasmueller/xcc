@@ -74,7 +74,7 @@ static bool is_asm(Stmt *stmt) {
   return stmt->kind == ST_ASM;
 }
 
-static void move_params_to_assigned(Function *func) {
+static inline void move_params_to_assigned(Function *func) {
   extern const char *kRegSizeTable[][PHYSICAL_REG_MAX];
   extern const int ArchRegParamMapping[];
   extern const char *kFReg64s[];
@@ -193,10 +193,10 @@ static size_t detect_funcall_work_size(Function *func) {
   if (funcalls != NULL) {
     for (int i = 0; i < funcalls->len; ++i) {
       Expr *funcall = funcalls->data[i];
-      FuncallInfo *funcall_info = funcall->funcall.info;
+      FuncallInfo *fcinfo = funcall->funcall.fcinfo;
 
       // Caller save registers.
-      IR *ir = funcall_info->call;
+      IR *ir = fcinfo->call;
       Vector *saves = collect_caller_save_regs(ir->call->living_pregs);
       ir->call->caller_saves = saves;
 

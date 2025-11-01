@@ -100,15 +100,15 @@ static void emit_number(void *ud, const Type *type, Expr *var, Fixnum offset) {
       assert(v == 0);
       v = get_indirect_function_index(var->var.name);
 
-      FuncInfo *info = table_get(&func_info_table, var->var.name);
-      if (info == NULL)
+      FuncInfo *finfo = table_get(&func_info_table, var->var.name);
+      if (finfo == NULL)
         error("`%.*s' not found", NAMES(var->var.name));
 
       RelocInfo *ri = calloc_or_die(sizeof(*ri));
       ri->type = R_WASM_TABLE_INDEX_I32;
       ri->offset = ds->len;
       ri->addend = offset;
-      ri->index = info->index;
+      ri->index = finfo->index;
 
       Vector *reloc_data = edp->reloc_data;
       if (reloc_data == NULL)
@@ -282,27 +282,27 @@ static void emit_import_section(EmitWasm *ew) {
     size_t module_name_len = strlen(module_name);
 
     const Name *name;
-    FuncInfo *info;
-    for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&info)) != -1; ) {
-      if (info->flag == 0 || info->func != NULL)
+    FuncInfo *finfo;
+    for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&finfo)) != -1; ) {
+      if (finfo->flag == 0 || finfo->func != NULL)
         continue;
-      VarInfo *varinfo = info->varinfo;
+      VarInfo *varinfo = finfo->varinfo;
       if (varinfo->storage & VS_STATIC) {
         error("Import: `%.*s' is not public", NAMES(name));
       }
 
       const char *modname = module_name;
       size_t modnamelen = module_name_len;
-      if (info->module_name != NULL) {
-        modname = info->module_name->chars;
-        modnamelen = info->module_name->bytes;
+      if (finfo->module_name != NULL) {
+        modname = finfo->module_name->chars;
+        modnamelen = finfo->module_name->bytes;
       }
-      const Name *fn = info->func_name;
+      const Name *fn = finfo->func_name;
 
       data_string(&imports_section, modname, modnamelen);  // import module name
       data_string(&imports_section, fn->chars, fn->bytes);  // import name
       data_push(&imports_section, IMPORT_FUNC);  // import kind
-      data_uleb128(&imports_section, -1, info->type_index);  // import signature index
+      data_uleb128(&imports_section, -1, finfo->type_index);  // import signature index
       ++imports_count;
     }
   }
@@ -352,12 +352,12 @@ static void emit_function_section(EmitWasm *ew) {
   uint32_t function_count = 0;
   {
     const Name *name;
-    FuncInfo *info;
-    for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&info)) != -1; ) {
-      if (info->func == NULL || is_function_omitted(info->varinfo))
+    FuncInfo *finfo;
+    for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&finfo)) != -1; ) {
+      if (finfo->func == NULL || is_function_omitted(finfo->varinfo))
         continue;
       ++function_count;
-      int type_index = info->type_index;
+      int type_index = finfo->type_index;
       data_uleb128(&functions_section, -1, type_index);  // function i signature index
     }
   }
@@ -420,12 +420,12 @@ static void emit_export_section(EmitWasm *ew) {
 
   const Name *name;
   for (int it = 0; (it = table_iterate(exports, it, &name, NULL)) != -1; ) {
-    FuncInfo *info = table_get(&func_info_table, name);
-    assert(info != NULL);
+    FuncInfo *finfo = table_get(&func_info_table, name);
+    assert(finfo != NULL);
 
     data_string(&exports_section, name->chars, name->bytes);  // export name
     data_uleb128(&exports_section, -1, IMPORT_FUNC);  // export kind
-    data_uleb128(&exports_section, -1, info->index);  // export func index
+    data_uleb128(&exports_section, -1, finfo->index);  // export func index
   }
   data_close_chunk(&exports_section, exports->count);  // num exports
   data_close_chunk(&exports_section, -1);
@@ -452,11 +452,11 @@ static void emit_elems_section(EmitWasm *ew) {
   data_push(&elems_section, OP_END);
   data_leb128(&elems_section, -1, count);  // num elems
   const Name *name;
-  FuncInfo *info;
+  FuncInfo *finfo;
   for (int it = 0;
-        (it = table_iterate(&indirect_function_table, it, &name, (void**)&info)) != -1; ) {
-    VERBOSE("%.*s (%u)\n", NAMES(info->varinfo->ident->ident), info->index);
-    data_leb128(&elems_section, -1, info->index);  // elem function index
+        (it = table_iterate(&indirect_function_table, it, &name, (void**)&finfo)) != -1; ) {
+    VERBOSE("%.*s (%u)\n", NAMES(name), finfo->index);
+    data_leb128(&elems_section, -1, finfo->index);  // elem function index
   }
   data_close_chunk(&elems_section, -1);
   VERBOSES("\n");
@@ -496,11 +496,11 @@ static void emit_code_section(EmitWasm *ew) {
   data_uleb128(&codesec, -1, ew->function_count);  // num functions
   {
     const Name *name;
-    FuncInfo *info;
+    FuncInfo *finfo;
     size_t offset = codesec.len;
-    for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&info)) != -1; ) {
-      Function *func = info->func;
-      if (func == NULL || is_function_omitted(info->varinfo))
+    for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&finfo)) != -1; ) {
+      Function *func = finfo->func;
+      if (func == NULL || is_function_omitted(finfo->varinfo))
         continue;
 
       FuncExtra *extra = func->extra;
@@ -566,55 +566,46 @@ static Vector *emit_data_section(EmitWasm *ew) {
   return reloc_data;
 }
 
-static void emit_linking_section(EmitWasm *ew) {
-  DataStorage linking_section;
-  static const char kLinkingName[] = "linking";
-  const int LINK_VERSION = 2;
-  data_init(&linking_section);
-  data_open_chunk(&linking_section);
-  data_string(&linking_section, kLinkingName, sizeof(kLinkingName) - 1);
-  data_uleb128(&linking_section, -1, LINK_VERSION);
-
-  // Symbol table.
-  data_push(&linking_section, LT_WASM_SYMBOL_TABLE);  // subsec type
-  data_open_chunk(&linking_section);  // Payload start.
-  data_open_chunk(&linking_section);
+static inline uint32_t emit_linking_symtab_function(DataStorage *linking_section) {
   uint32_t count = 0;
-  // Functions
   for (int k = 0; k < 2; ++k) {  // To match function index and linking order, do twice.
     const Name *name;
-    FuncInfo *info;
-    for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&info)) != -1; ) {
-      if ((k == 0 && (info->func != NULL || info->flag == 0)) ||  // Put external function first.
-          (k == 1 && info->func == NULL))                         // Defined function later.
+    FuncInfo *finfo;
+    for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&finfo)) != -1; ) {
+      if ((k == 0 && (finfo->func != NULL || finfo->flag == 0)) ||  // Put external function first.
+          (k == 1 && finfo->func == NULL))                         // Defined function later.
         continue;
-      if (is_function_omitted(info->varinfo))
+      if (is_function_omitted(finfo->varinfo))
         continue;
 
       int flags = 0;
-      if (info->func == NULL)
+      if (finfo->func == NULL)
         flags |= WASM_SYM_UNDEFINED;
-      if (info->varinfo->storage & VS_STATIC)
+      if (finfo->varinfo->storage & VS_STATIC)
         flags |= WASM_SYM_BINDING_LOCAL | WASM_SYM_VISIBILITY_HIDDEN;
-      if (info->flag & FF_WEAK)
+      if (finfo->flag & FF_WEAK)
         flags |= WASM_SYM_BINDING_WEAK;
-      if (info->flag & FF_IMPORT_NAME) {
+      if (finfo->flag & FF_IMPORT_NAME) {
         // __attribute((import_name("..."))) is specified:
         flags |= WASM_SYM_EXPLICIT_NAME;
       }
 
-      data_push(&linking_section, SIK_SYMTAB_FUNCTION);  // kind
-      data_uleb128(&linking_section, -1, flags);
-      data_uleb128(&linking_section, -1, info->index);
+      data_push(linking_section, SIK_SYMTAB_FUNCTION);  // kind
+      data_uleb128(linking_section, -1, flags);
+      data_uleb128(linking_section, -1, finfo->index);
 
-      if (info->func != NULL ||  // Defined function: put name. otherwise not required.
+      if (finfo->func != NULL ||  // Defined function: put name. otherwise not required.
           flags & WASM_SYM_EXPLICIT_NAME) {
-        data_string(&linking_section, name->chars, name->bytes);
+        data_string(linking_section, name->chars, name->bytes);
       }
       ++count;
     }
   }
-  // Globals
+  return count;
+}
+
+static inline uint32_t emit_linking_symtab_global(EmitWasm *ew, DataStorage *linking_section) {
+  uint32_t count = 0;
   for (int k = 0; k < 3; ++k) {  // 0=unresolved, 1=resolved(data), 2=resolved(bss)
     const Name *name;
     GVarInfo *info;
@@ -640,58 +631,83 @@ static void emit_linking_section(EmitWasm *ew) {
         flags |= WASM_SYM_BINDING_LOCAL | WASM_SYM_VISIBILITY_HIDDEN;
 
       if (is_global_datsec_var(varinfo, global_scope)) {
-        data_push(&linking_section, SIK_SYMTAB_DATA);  // kind
-        data_uleb128(&linking_section, -1, flags);
+        data_push(linking_section, SIK_SYMTAB_DATA);  // kind
+        data_uleb128(linking_section, -1, flags);
         const Name *name = varinfo->ident->ident;
-        data_string(&linking_section, name->chars, name->bytes);
+        data_string(linking_section, name->chars, name->bytes);
         if (!(info->flag & GVF_UNRESOLVED)) {  // Defined global: put name. otherwise not required.
-          data_uleb128(&linking_section, -1, info->item_index);
-          data_uleb128(&linking_section, -1, 0);  // offset (must start from the begining)
-          data_uleb128(&linking_section, -1, type_size(varinfo->type));  // size
+          data_uleb128(linking_section, -1, info->item_index);
+          data_uleb128(linking_section, -1, 0);  // offset (must start from the begining)
+          data_uleb128(linking_section, -1, type_size(varinfo->type));  // size
         }
       } else {
-        data_push(&linking_section, SIK_SYMTAB_GLOBAL);  // kind
-        data_uleb128(&linking_section, -1, flags);
-        data_uleb128(&linking_section, -1, info->item_index);
+        data_push(linking_section, SIK_SYMTAB_GLOBAL);  // kind
+        data_uleb128(linking_section, -1, flags);
+        data_uleb128(linking_section, -1, info->item_index);
         if (info->item_index >= ew->import_global_count) {
           const Name *name = varinfo->ident->ident;
-          data_string(&linking_section, name->chars, name->bytes);
+          data_string(linking_section, name->chars, name->bytes);
         }
       }
 
       ++count;
     }
   }
+  return count;
+}
+
+static inline uint32_t emit_linking_symtab_table(DataStorage *linking_section) {
+  uint32_t count = 0;
   if (tables->len > 0) {  // Table
     for (int i = 0, len = tables->len; i < len; ++i) {
       TableInfo *ti = tables->data[i];
       int flags = WASM_SYM_UNDEFINED | WASM_SYM_EXPORTED | WASM_SYM_NO_STRIP;
-      data_push(&linking_section, SIK_SYMTAB_TABLE);  // kind
-      data_uleb128(&linking_section, -1, flags);
-      data_uleb128(&linking_section, -1, ti->index);
+      data_push(linking_section, SIK_SYMTAB_TABLE);  // kind
+      data_uleb128(linking_section, -1, flags);
+      data_uleb128(linking_section, -1, ti->index);
       ++count;
     }
   }
+  return count;
+}
+
+static inline uint32_t emit_linking_symtab_event(DataStorage *linking_section) {
+  uint32_t count = 0;
   if (tags->len > 0) {  // Tag
     for (int i = 0, len = tags->len; i < len; ++i) {
       TagInfo *ti = tags->data[i];
       int flags = WASM_SYM_BINDING_WEAK;
-      data_push(&linking_section, SIK_SYMTAB_EVENT);  // kind
-      data_uleb128(&linking_section, -1, flags);
-      data_uleb128(&linking_section, -1, ti->index);
-      data_string(&linking_section, ti->name->chars, ti->name->bytes);
+      data_push(linking_section, SIK_SYMTAB_EVENT);  // kind
+      data_uleb128(linking_section, -1, flags);
+      data_uleb128(linking_section, -1, ti->index);
+      data_string(linking_section, ti->name->chars, ti->name->bytes);
       ++count;
     }
   }
-  data_close_chunk(&linking_section, count);
-  data_close_chunk(&linking_section, -1);  // Put payload size.
+  return count;
+}
 
-  // Data segments.
+static inline void emit_linking_symbol_table(EmitWasm *ew, DataStorage *linking_section) {
+  data_push(linking_section, LT_WASM_SYMBOL_TABLE);  // subsec type
+  data_open_chunk(linking_section);  // Payload start.
+  data_open_chunk(linking_section);
+  uint32_t count = 0;
+
+  count += emit_linking_symtab_function(linking_section);
+  count += emit_linking_symtab_global(ew, linking_section);
+  count += emit_linking_symtab_table(linking_section);
+  count += emit_linking_symtab_event(linking_section);
+
+  data_close_chunk(linking_section, count);
+  data_close_chunk(linking_section, -1);  // Put payload size.
+}
+
+static inline void emit_linking_segment_info(EmitWasm *ew, DataStorage *linking_section) {
   Vector *segments = ew->data_segments;
   if (segments->len > 0) {
-    data_push(&linking_section, LT_WASM_SEGMENT_INFO);  // subsec type
-    data_open_chunk(&linking_section);  // Payload start.
-    data_uleb128(&linking_section, -1, segments->len);
+    data_push(linking_section, LT_WASM_SEGMENT_INFO);  // subsec type
+    data_open_chunk(linking_section);  // Payload start.
+    data_uleb128(linking_section, -1, segments->len);
     for (int i = 0; i < segments->len; ++i) {
       DataSegment *segment = segments->data[i];
       VarInfo *varinfo = segment->gvarinfo->varinfo;
@@ -707,27 +723,42 @@ static void emit_linking_section(EmitWasm *ew) {
       }
 
       const Name *name = varinfo->ident->ident;
-      data_string(&linking_section, name->chars, name->bytes);
-      data_uleb128(&linking_section, -1, segment->p2align);
-      data_uleb128(&linking_section, -1, flags);
+      data_string(linking_section, name->chars, name->bytes);
+      data_uleb128(linking_section, -1, segment->p2align);
+      data_uleb128(linking_section, -1, flags);
     }
-    data_close_chunk(&linking_section, -1);
+    data_close_chunk(linking_section, -1);
   }
+}
 
+static inline void emit_linking_init_funcs(DataStorage *linking_section) {
   if (init_funcs != NULL) {
-    data_push(&linking_section, LT_WASM_INIT_FUNCS);  // subsec type
-    data_open_chunk(&linking_section);  // Payload start.
-    data_uleb128(&linking_section, -1, init_funcs->len);  // Count
+    data_push(linking_section, LT_WASM_INIT_FUNCS);  // subsec type
+    data_open_chunk(linking_section);  // Payload start.
+    data_uleb128(linking_section, -1, init_funcs->len);  // Count
     for (int i = 0; i < init_funcs->len; ++i) {
       Function *func = init_funcs->data[i];
-      FuncInfo *info;
-      info = table_get(&func_info_table, func->ident->ident);
-      assert(info != NULL);
-      data_uleb128(&linking_section, -1, 65535);  // Priority
-      data_uleb128(&linking_section, -1, info->index);  // Symbol index
+      FuncInfo *finfo = table_get(&func_info_table, func->ident->ident);
+      assert(finfo != NULL);
+      data_uleb128(linking_section, -1, 65535);  // Priority
+      data_uleb128(linking_section, -1, finfo->index);  // Symbol index
     }
-    data_close_chunk(&linking_section, -1);
+    data_close_chunk(linking_section, -1);
   }
+}
+
+static void emit_linking_section(EmitWasm *ew) {
+  DataStorage linking_section;
+  static const char kLinkingName[] = "linking";
+  const int LINK_VERSION = 2;
+  data_init(&linking_section);
+  data_open_chunk(&linking_section);
+  data_string(&linking_section, kLinkingName, sizeof(kLinkingName) - 1);
+  data_uleb128(&linking_section, -1, LINK_VERSION);
+
+  emit_linking_symbol_table(ew, &linking_section);
+  emit_linking_segment_info(ew, &linking_section);
+  emit_linking_init_funcs(&linking_section);
 
   if (linking_section.len > 0) {
     data_close_chunk(&linking_section, -1);
@@ -786,10 +817,10 @@ static void emit_reloc_code_section(EmitWasm *ew) {
   Vector *code_reloc_all = new_vector();
 
   const Name *name;
-  FuncInfo *info;
-  for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&info)) != -1; ) {
-    Function *func = info->func;
-    if (func == NULL || is_function_omitted(info->varinfo))
+  FuncInfo *finfo;
+  for (int it = 0; (it = table_iterate(&func_info_table, it, &name, (void**)&finfo)) != -1; ) {
+    Function *func = finfo->func;
+    if (func == NULL || is_function_omitted(finfo->varinfo))
       continue;
 
     FuncExtra *extra = func->extra;

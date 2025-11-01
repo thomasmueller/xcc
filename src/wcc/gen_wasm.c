@@ -53,7 +53,7 @@ static void gen_compare_expr(enum ExprKind kind, Expr *lhs, Expr *rhs, bool need
   assert(is_prim_type(lhs->type) || !needval);
 
   gen_expr(lhs, needval);
-  if (needval && is_const(rhs) && is_fixnum(rhs->type->kind) && rhs->fixnum == 0 && kind == EX_EQ) {
+  if (needval && is_const(rhs) && is_fixnum(rhs->type) && rhs->fixnum == 0 && kind == EX_EQ) {
     ADD_CODE(type_size(lhs->type) <= I32_SIZE ? OP_I32_EQZ : OP_I64_EQZ);
     return;
   }
@@ -65,7 +65,7 @@ static void gen_compare_expr(enum ExprKind kind, Expr *lhs, Expr *rhs, bool need
   if (is_flonum(lhs->type)) {
     index = lhs->type->flonum.kind >= FL_DOUBLE ? 5 : 4;
   } else {
-    index = (!is_fixnum(lhs->type->kind) || lhs->type->fixnum.is_unsigned ? 2 : 0) +
+    index = (!is_fixnum(lhs->type) || lhs->type->fixnum.is_unsigned ? 2 : 0) +
             (type_size(lhs->type) > I32_SIZE ? 1 : 0);
   }
 
@@ -215,7 +215,7 @@ static void gen_switch(Stmt *stmt) {
   }
   // Must be simple expression, because this is evaluated multiple times.
   assert(is_const(value) || value->kind == EX_VAR);
-  assert(is_fixnum(value->type->kind));
+  assert(is_fixnum(value->type));
 
   int default_index = block_count;
   Fixnum min = INTPTR_MAX;
@@ -422,28 +422,25 @@ static void gen_return(Stmt *stmt, bool is_last) {
   if (stmt->return_.val != NULL) {
     Expr *val = stmt->return_.val;
     const Type *rettype = val->type;
-    if (is_small_struct(rettype)) {
-      gen_lval(val);
-      const Type *et = get_small_struct_elem_type(rettype);
-      gen_load(et);
-    } else if (is_prim_type(rettype) || rettype->kind == TY_VOID) {
+    if (is_prim_type(rettype) || rettype->kind == TY_VOID) {
       gen_expr(val, true);
     } else {
+      assert(rettype->kind == TY_STRUCT);
       FuncInfo *finfo = table_get(&func_info_table, curfunc->ident->ident);
       assert(finfo != NULL);
-      if (!(finfo->flag & FF_INLINING)) {
-        // Local #0 is the pointer for result.
-        ADD_CODE(OP_LOCAL_GET, 0);
-        gen_expr(val, true);
+      if (finfo->flag & FF_INLINING) {
+        gen_lval(val);  // Put a pointer to the top of stack.
+      } else if (is_small_struct(rettype)) {
+        gen_lval(val);
+        const Type *et = get_small_struct_elem_type(rettype);
+        gen_load(et);
+      } else {
+        ADD_CODE(OP_LOCAL_GET, 0);  // Local #0 is the pointer for result.
+        gen_lval(val);
         ADD_CODE(OP_I32_CONST);
         ADD_LEB128(type_size(rettype));
-        ADD_CODE(OP_0xFC, OPFC_MEMORY_COPY, 0, 0);  // src, dst
-        // Result.
-        ADD_CODE(OP_LOCAL_GET, 0);
-      } else {
-        // Inlining a function which returns struct:
-        // Put value pointer on top of the stack.
-        gen_expr(val, true);
+        ADD_CODE(OP_0xFC, OPFC_MEMORY_COPY, 0, 0);
+        // Struct result is stored, and not return the value.
       }
     }
   }
@@ -585,29 +582,25 @@ void gen_stmts(Vector *stmts, bool is_last) {
   }
 }
 
-static inline uint32_t allocate_local_variables(Function *func, DataStorage *data) {
+static inline uint32_t calc_frame_size(
+    Function *func, unsigned int local_counts[4], FuncInfo *finfo) {
   const Type *functype = func->type;
-  const Type *rettype = functype->func.ret;
-  unsigned int ret_param = rettype->kind == TY_STRUCT && !is_small_struct(rettype) ? 1 : 0;
   unsigned int param_count = functype->func.params != NULL ? functype->func.params->len : 0;
-  unsigned int pparam_count = 0;  // Primitive parameter count
-
+  const Name *va_args_name = functype->func.vaargs ? alloc_name(VA_ARGS_NAME, NULL, false) : NULL;
   uint32_t frame_size = 0;
-  unsigned int local_counts[4];  // I32, I64, F32, F64
-  memset(local_counts, 0, sizeof(local_counts));
-
   for (int i = 0; i < func->scopes->len; ++i) {
     Scope *scope = func->scopes->data[i];
     for (int j = 0; j < scope->vars->len; ++j) {
       VarInfo *varinfo = scope->vars->data[j];
       const Type *type = varinfo->type;
       int param_index = -1;
-      if (i == 0 && param_count > 0) {
-        int k = get_funparam_index(func, varinfo->ident->ident);
-        if (k >= 0) {
-          param_index = k;
-          if (is_small_struct(type) || !is_stack_param(type))
-            ++pparam_count;
+      if (i == 0 && varinfo->storage & VS_PARAM) {
+        if (va_args_name != NULL && equal_name(varinfo->ident->ident, va_args_name)) {
+          param_index = param_count;
+        } else if (param_count > 0) {
+          int k = get_funparam_index(func, varinfo->ident->ident);
+          if (k >= 0)
+            param_index = k;
         }
       }
 
@@ -639,9 +632,7 @@ static inline uint32_t allocate_local_variables(Function *func, DataStorage *dat
       }
     }
   }
-  FuncInfo *finfo = table_get(&func_info_table, func->ident->ident);
-  assert(finfo != NULL);
-  if (frame_size > 0 || param_count != pparam_count || (finfo->flag & FF_STACK_MODIFIED)) {
+  if (frame_size > 0 || (finfo->flag & FF_STACK_MODIFIED)) {
     frame_size = ALIGN(frame_size, STACK_ALIGN);
 
     // Allocate a variable for base pointer in function top scope.
@@ -651,28 +642,15 @@ static inline uint32_t allocate_local_variables(Function *func, DataStorage *dat
     scope_add(func->scopes->data[0], bpident, &tySize, 0);
     local_counts[WT_I32 - WT_I32] += 1;
   }
+  return frame_size;
+}
 
-  unsigned int local_index_count = 0;
-  for (int i = 0; i < 4; ++i) {
-    if (local_counts[i] > 0)
-      ++local_index_count;
-  }
-  data_uleb128(data, -1, local_index_count);
-  int variadic = func->type->func.vaargs;
-  unsigned int local_indices[4];
-  for (int i = 0; i < 4; ++i) {
-    unsigned int count = local_counts[i];
-    if (count > 0) {
-      data_uleb128(data, -1, count);
-      data_push(data, WT_I32 - i);
-    }
-    local_indices[i] = i == 0 ? ret_param + variadic + pparam_count
-                              : local_indices[i - 1] + local_counts[i - 1];
-  }
-
+static inline void assign_variable_index_or_offsets(
+    Function *func, unsigned int ret_param, size_t frame_size, unsigned int local_indices[4]) {
+  const Type *functype = func->type;
+  unsigned int param_count = functype->func.params != NULL ? functype->func.params->len : 0;
+  const Name *va_args_name = functype->func.vaargs ? alloc_name(VA_ARGS_NAME, NULL, false) : NULL;
   uint32_t frame_offset = 0;
-  unsigned int param_no = ret_param;
-  uint32_t sparam_offset = 0;
   for (int i = 0; i < func->scopes->len; ++i) {
     Scope *scope = func->scopes->data[i];
     for (int j = 0; j < scope->vars->len; ++j) {
@@ -683,30 +661,28 @@ static inline uint32_t allocate_local_variables(Function *func, DataStorage *dat
       VReg *vreg = calloc_or_die(sizeof(*vreg));
       varinfo->local.vreg = vreg;
       int param_index = -1;
-      if (i == 0 && param_count > 0) {
-        int k = get_funparam_index(func, varinfo->ident->ident);
-        if (k >= 0)
-          param_index = k;
+      if (i == 0 && varinfo->storage & VS_PARAM) {
+        if (va_args_name != NULL && equal_name(varinfo->ident->ident, va_args_name)) {
+          param_index = param_count;
+        } else if (param_count > 0) {
+          int k = get_funparam_index(func, varinfo->ident->ident);
+          if (k >= 0)
+            param_index = k;
+        }
       }
       vreg->param_index = ret_param + param_index;
       const Type *type = varinfo->type;
       size_t size = type_size(type), align = align_size(type);
       bool prim = is_prim_type(type);
       if (param_index >= 0) {
+        vreg->prim.local_index = vreg->param_index;
         bool small_struct = is_small_struct(type);
-        if (prim || small_struct) {
-          vreg->prim.local_index = param_no++;
-          if (small_struct || varinfo->storage & VS_REF_TAKEN) {
-            frame_offset = ALIGN(frame_offset, align);
-            vreg->non_prim.offset = frame_offset - frame_size;
-            if (size < 1)
-              size = 1;
-            frame_offset += size;
-          }
-        } else {  // Non primitive parameter, passed through stack.
-          sparam_offset = ALIGN(sparam_offset, align);
-          vreg->non_prim.offset = sparam_offset;
-          sparam_offset += size;
+        if (small_struct || varinfo->storage & VS_REF_TAKEN) {
+          frame_offset = ALIGN(frame_offset, align);
+          vreg->non_prim.offset = frame_offset - frame_size;
+          if (size < 1)
+            size = 1;
+          frame_offset += size;
         }
       } else {
         if ((prim && varinfo->storage & VS_REF_TAKEN) ||  // `&` taken wasm local var.
@@ -717,68 +693,55 @@ static inline uint32_t allocate_local_variables(Function *func, DataStorage *dat
             size = 1;
           frame_offset += size;
         } else {  // Not `&` taken, wasm local var.
-          if (param_index < 0) {
-            unsigned char wt = to_wtype(type);
-            int index = WT_I32 - wt;
-            vreg->prim.local_index = local_indices[index]++;
-          } else {
-            vreg->prim.local_index = param_no;
-          }
+          unsigned char wt = to_wtype(type);
+          int index = WT_I32 - wt;
+          vreg->prim.local_index = local_indices[index]++;
         }
       }
     }
   }
+}
+
+static inline uint32_t allocate_local_variables(Function *func, DataStorage *data) {
+  const Type *functype = func->type;
+  const Type *rettype = functype->func.ret;
+  unsigned int ret_param = rettype->kind == TY_STRUCT && !is_small_struct(rettype) ? 1 : 0;
+
+  unsigned int local_counts[4];  // I32, I64, F32, F64
+  memset(local_counts, 0, sizeof(local_counts));
+
+  FuncInfo *finfo = table_get(&func_info_table, func->ident->ident);
+  assert(finfo != NULL);
+
+  size_t frame_size = calc_frame_size(func, local_counts, finfo);
+
+  unsigned int local_index_count = 0;
+  for (int i = 0; i < 4; ++i) {
+    if (local_counts[i] > 0)
+      ++local_index_count;
+  }
+  data_uleb128(data, -1, local_index_count);
+  int variadic = func->type->func.vaargs;
+  unsigned int param_count = functype->func.params != NULL ? functype->func.params->len : 0;
+  unsigned int local_indices[4];
+  for (int i = 0; i < 4; ++i) {
+    unsigned int count = local_counts[i];
+    if (count > 0) {
+      data_uleb128(data, -1, count);
+      data_push(data, WT_I32 - i);
+    }
+    local_indices[i] = i == 0 ? ret_param + variadic + param_count
+                              : local_indices[i - 1] + local_counts[i - 1];
+  }
+
+  assign_variable_index_or_offsets(func, ret_param, frame_size, local_indices);
 
   assert(((frame_size + finfo->stack_work_size) & (STACK_ALIGN - 1)) == 0);
   return frame_size + finfo->stack_work_size;
 }
 
-static void gen_defun(Function *func) {
-  if (func->scopes == NULL)  // Prototype definition
-    return;
-
-  VarInfo *funcvi = scope_find(global_scope, func->ident->ident, NULL);
-  if (is_function_omitted(funcvi))
-    return;
-
-  DataStorage *code = malloc_or_die(sizeof(*code));
-  data_init(code);
-  data_open_chunk(code);
-
-  FuncExtra *extra = func->extra;
-  assert(extra != NULL);
-  extra->code = code;
-  func->extra = extra;
-  uint32_t frame_size = allocate_local_variables(func, code);
-
-  curfunc = func;
-  curcodeds = code;
-
-  // Prologue
-
-  const Type *functype = func->type;
-  if (functype->func.vaargs) {
-    const Name *va_args = alloc_name(VA_ARGS_NAME, NULL, false);
-    const VarInfo *varinfo = scope_find(func->scopes->data[0], va_args, NULL);
-    assert(varinfo != NULL);
-    VReg *vreg = varinfo->local.vreg;
-    assert(vreg != NULL);
-
-    int vaarg_param_index = 0;
-    for (int i = 0; i < func->params->len; ++i) {
-      const VarInfo *varinfo = func->params->data[i];
-      const Type *type = varinfo->type;
-      if (is_small_struct(type) || !is_stack_param(type))
-        ++vaarg_param_index;
-    }
-
-    ADD_CODE(OP_LOCAL_GET);
-    ADD_ULEB128(vaarg_param_index);
-    ADD_CODE(OP_LOCAL_SET);
-    ADD_ULEB128(vreg->prim.local_index);
-  }
-
-  // Set up base pointer.
+static inline void setup_base_pointer(
+    Function *func, uint32_t frame_size, Expr **pbpvar, Expr **plspvar, Expr **pgspvar) {
   FuncInfo *finfo = table_get(&func_info_table, func->ident->ident);
   assert(finfo != NULL);
   const Name *bpname = finfo->bpname;
@@ -809,6 +772,13 @@ static void gen_defun(Function *func) {
       gen_expr_stmt(result);
     }
   }
+
+  *pbpvar = bpvar;
+  *plspvar = lspvar;
+  *pgspvar = gspvar;
+}
+
+static inline void move_params_to_stack_frame(Function *func) {
   if (func->params != NULL) {
     const Vector *params = func->params;
     for (int i = 0, param_count = params->len; i < param_count; ++i) {
@@ -823,7 +793,7 @@ static void gen_defun(Function *func) {
         ADD_ULEB128(vreg->prim.local_index);
         gen_store(get_small_struct_elem_type(type));
       } else if (is_stack_param(type)) {
-        continue;
+        // Nothing.
       } else if (varinfo->storage & VS_REF_TAKEN) {
         // Store ref-taken parameters to stack frame.
         VReg *vreg = varinfo->local.vreg;
@@ -834,7 +804,10 @@ static void gen_defun(Function *func) {
       }
     }
   }
+}
 
+static inline void gen_func_body(Function *func, Expr *bpvar, Expr *lspvar) {
+  const Type *functype = func->type;
   // Statements
   if (bpvar != NULL || lspvar != NULL) {
     unsigned char wt = get_func_ret_wtype(functype->func.ret);
@@ -859,7 +832,9 @@ static void gen_defun(Function *func) {
       }
     }
   }
+}
 
+static inline void epilogue(Function *func, uint32_t frame_size, Expr *bpvar, Expr *lspvar, Expr *gspvar) {
   // Epilogue
   if (bpvar != NULL) {
     ADD_CODE(OP_END);
@@ -871,6 +846,7 @@ static void gen_defun(Function *func) {
     ADD_CODE(OP_END);
     cur_depth -= 1;
 
+    FuncInfo *finfo = table_get(&func_info_table, func->ident->ident);
     assert(!(finfo->flag & FF_STACK_MODIFIED));
     assert(frame_size > 0);
     // Restore stack pointer: global.sp = local.sp + frame_size;
@@ -878,6 +854,37 @@ static void gen_defun(Function *func) {
                                new_expr_bop(EX_ADD, &tyVoidPtr, NULL, lspvar,
                                             new_expr_fixlit(&tySize, NULL, frame_size))));
   }
+}
+
+static void gen_defun(Function *func) {
+  if (func->scopes == NULL)  // Prototype definition
+    return;
+
+  VarInfo *funcvi = scope_find(global_scope, func->ident->ident, NULL);
+  if (is_function_omitted(funcvi))
+    return;
+
+  DataStorage *code = malloc_or_die(sizeof(*code));
+  data_init(code);
+  data_open_chunk(code);
+
+  FuncExtra *extra = func->extra;
+  assert(extra != NULL);
+  extra->code = code;
+  func->extra = extra;
+  uint32_t frame_size = allocate_local_variables(func, code);
+
+  curfunc = func;
+  curcodeds = code;
+
+  // Prologue
+  Expr *bpvar, *lspvar, *gspvar;
+  setup_base_pointer(func, frame_size, &bpvar, &lspvar, &gspvar);
+  move_params_to_stack_frame(func);
+
+  gen_func_body(func, bpvar, lspvar);
+
+  epilogue(func, frame_size, bpvar, lspvar, gspvar);
 
   ADD_CODE(OP_END);
 
